@@ -2956,7 +2956,11 @@ function Move-ControlFile([string]$path) {
 }
 
 function Move-WpBundle([string]$title, [string[]]$paths) {
-    $opts = @("Pick list folder", "'Noch zu drucken' folder", "", "Back")
+    if (Get-Setting 'REPRINT') {
+        $opts = @("Pick list folder", "'Noch zu drucken' folder", "", "Back")
+    } else {
+        $opts = @("Pick list folder", "", "Back")
+    }
     $c = Show-Menu $title $opts
     if ($c -lt 0) { return 0 }
     $pick = $opts[$c]
@@ -3193,7 +3197,7 @@ function Format-Setting([string]$value, [int]$max) {
 
 function Test-SetupComplete {
     $s = Get-Settings
-    foreach ($k in @('PRINTER', 'ROOT', 'PICKLIST', 'REPRINT', 'PUMPCONTROL')) {
+    foreach ($k in @('PRINTER', 'ROOT', 'PICKLIST', 'PUMPCONTROL')) {
         if (-not $s[$k]) { return $false }
     }
     return $true
@@ -3220,7 +3224,8 @@ function Invoke-Settings([bool]$requireAll) {
         $entries.Add(@{ Text = ("Default printer".PadRight(24) + ":  " + (Format-Setting $s['PRINTER'] 46)); Header = $false; Act = 'PRINTER'; Done = [bool]$s['PRINTER'] })
         $entries.Add(@{ Text = ("Outbound main folder".PadRight(24) + ":  " + (Format-Setting $s['ROOT'] 46)); Header = $false; Act = 'ROOT'; Done = [bool]$s['ROOT'] })
         $entries.Add(@{ Text = ("Pick list folder".PadRight(24) + ":  " + (Format-Setting $s['PICKLIST'] 46)); Header = $false; Act = 'PICKLIST'; Done = [bool]$s['PICKLIST'] })
-        $entries.Add(@{ Text = ("'Noch zu drucken' folder".PadRight(24) + ":  " + (Format-Setting $s['REPRINT'] 46)); Header = $false; Act = 'REPRINT'; Done = [bool]$s['REPRINT'] })
+        $reprintText = if ($s['REPRINT']) { Format-Setting $s['REPRINT'] 46 } else { "(optional)" }
+        $entries.Add(@{ Text = ("'Noch zu drucken' folder".PadRight(24) + ":  " + $reprintText); Header = $false; Act = 'REPRINT'; Done = $true })
         $entries.Add(@{ Text = ("Pump control folder".PadRight(24) + ":  " + (Format-Setting $s['PUMPCONTROL'] 46)); Header = $false; Act = 'PUMPCONTROL'; Done = [bool]$s['PUMPCONTROL'] })
         $entries.Add(@{ Text = ("Halle M scan folder".PadRight(24) + ":  " + (Format-Setting $s['SCANDIR'] 40) + "   (beta)"); Header = $false; Act = 'SCANDIR'; Done = [bool]$s['SCANDIR'] })
         $bIdx = 0
