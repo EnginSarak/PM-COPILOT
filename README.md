@@ -159,6 +159,15 @@ PROMEDIA COPILOT/
 
 ## Changelog
 
+### 1.2.0
+
+- The folder name is now a required field when filing: "New folder here (own
+  name)" no longer cancels silently when you just press Enter, it asks again
+  until a name is entered. Type `x` to cancel on purpose.
+- Both folder name prompts now reject characters Windows does not allow in a
+  folder name (`\ / : * ? " < > |`) instead of creating a broken or nested
+  folder, and the "Create folder" prompt can be cancelled with `x` as well.
+
 ### 1.1.0
 
 - The "'Noch zu drucken' folder" setting is now optional: setup completes

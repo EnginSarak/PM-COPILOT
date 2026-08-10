@@ -926,7 +926,7 @@ function Stop-Spin($spin) {
     try { [Console]::Write("`r" + (' ' * 78) + "`r") } catch { }
 }
 
-$script:AppVersion = '1.1.0'
+$script:AppVersion = '1.2.0'
 
 function Get-PdfTjTokens([string]$path) {
     $bytes = [System.IO.File]::ReadAllBytes($path)
@@ -2838,6 +2838,25 @@ function Move-FileSafe([string]$src, [string]$dest) {
     }
 }
 
+function Read-FolderName([string]$prompt, [string]$default) {
+    while ($true) {
+        $n = Read-Host $prompt
+        if ($null -eq $n) { $n = '' }
+        $n = $n.Trim()
+        if ($n -eq 'x' -or $n -eq 'X') { return '' }
+        if (-not $n) {
+            if ($default) { return $default }
+            Write-Host "  A name is required. Type x to cancel." -ForegroundColor Yellow
+            continue
+        }
+        if ($n -match '[\\/:*?"<>|]') {
+            Write-Host '  Not allowed in a folder name: \ / : * ? " < > |' -ForegroundColor Yellow
+            continue
+        }
+        return $n
+    }
+}
+
 function Move-PairInteractive([string]$root, [string]$startDir, [string]$title, [hashtable]$info, [string[]]$files) {
     $month = $info.Month
     $year = $info.Year
@@ -2942,8 +2961,8 @@ function Move-PairInteractive([string]$root, [string]$startDir, [string]$title, 
             Write-Host ""
             $target = $effContainer
             Write-Host ("  Creating in: " + $target) -ForegroundColor DarkGray
-            $name = Read-Host ("  Folder name (Enter = " + $suggest + ")")
-            if ([string]::IsNullOrWhiteSpace($name)) { $name = $suggest }
+            $name = Read-FolderName ("  Folder name (Enter = " + $suggest + ", x = cancel)") $suggest
+            if (-not $name) { continue }
             $newDir = Join-Path $target $name
             try {
                 if ($needYear -and (-not (Test-Path -LiteralPath $target))) { New-Item -ItemType Directory -Path $target | Out-Null }
@@ -2956,8 +2975,8 @@ function Move-PairInteractive([string]$root, [string]$startDir, [string]$title, 
         } elseif ($act -eq "NEWDIR") {
             Write-Host ""
             Write-Host ("  Creating in: " + $cur) -ForegroundColor DarkGray
-            $name = Read-Host "  New folder name (empty = cancel)"
-            if (-not [string]::IsNullOrWhiteSpace($name)) {
+            $name = Read-FolderName "  New folder name (required, x = cancel)" ''
+            if ($name) {
                 $newDir = Join-Path $cur $name
                 try {
                     if (-not (Test-Path -LiteralPath $newDir)) { New-Item -ItemType Directory -Path $newDir | Out-Null }
