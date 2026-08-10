@@ -1,5 +1,5 @@
-VERSION=1.0.0
-NOTE=Banner redrawn smaller with a live-resize fix, app icon corrected to match the PROMEDIA logo, version line now in blue
+VERSION=1.1.0
+NOTE=Optional 'noch zu drucken' folder, FU scan retries later pages when OCR is confused by annotations, folder matching falls back to later customer name words
 FILE=_promedia_copilot.ps1
 FILE=PROMEDIA COPILOT.bat
 FILE=reset.bat

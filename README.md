@@ -159,6 +159,19 @@ PROMEDIA COPILOT/
 
 ## Changelog
 
+### 1.1.0
+
+- The "'Noch zu drucken' folder" setting is now optional: setup completes
+  without it, the settings screen shows "(optional)" when it is empty, and
+  the folder is only offered as a move destination when it is actually set.
+- FÜ scan now recognizes documents even when handwritten annotations on the
+  Delivery Note page confuse the OCR: it automatically retries with the
+  following pages (Packing List, CMR) before giving up.
+- Move to folders now falls back to later words in the customer name
+  (3rd, 4th, ...) when the first two don't match any existing folder, so
+  customers like "Farouk Maamoun Tamer &Co" correctly land in a folder
+  named after a later part of their name (e.g. "Tamer").
+
 ### 1.0.0
 
 - Renamed the tool from DOC WIZARD to **PROMEDIA COPILOT**: new banner, new icon,
