@@ -1828,7 +1828,7 @@ function ConvertTo-FuKunde([string]$s) {
         }
     }
     if ($merged.Count -eq 0) { return '' }
-    $take = [math]::Min(3, $merged.Count)
+    $take = [math]::Min(2, $merged.Count)
     return (@($merged)[0..($take - 1)] -join '_')
 }
 
@@ -2045,7 +2045,13 @@ function Get-FuMoveInfo($f) {
         if ($fi.Kunde) { $kunde = $fi.Kunde -replace '_', ' ' }
     }
 
-    return @{ Customer = $kunde; Month = $month; Year = $year; SiteText = $text; Country = $country; DestText = $destText; Location = $location }
+    $kundeFull = $kunde
+    if ($destLines.Count -gt 0) {
+        $cand = ($destLines[0] -replace '[\\/:*?"<>|]', ' ').Trim()
+        if ($cand -and (Normalize-Name $cand)) { $kundeFull = $cand }
+    }
+
+    return @{ Customer = $kunde; CustomerFull = $kundeFull; Month = $month; Year = $year; SiteText = $text; Country = $country; DestText = $destText; Location = $location }
 }
 
 function Invoke-FuMove {
@@ -2367,7 +2373,8 @@ function Get-DeliveryInfo([string]$path) {
 
     $rawName = Get-DestName $t
     $cparts = @($rawName -replace '[\\/:*?"<>|]', ' ' -split '\s+' | Where-Object { $_ -ne '' -and $_ -notmatch '^[&+]+$' -and $_ -notmatch '^(and|und)$' })
-    if ($cparts.Count -gt 4) { $cparts = $cparts[0..3] }
+    $customerFull = ($cparts -join ' ')
+    if ($cparts.Count -gt 2) { $cparts = $cparts[0..1] }
     $customer = ($cparts -join ' ')
 
     $siteSb = New-Object System.Text.StringBuilder
@@ -2399,7 +2406,7 @@ function Get-DeliveryInfo([string]$path) {
         $location = ([regex]::Replace($location, '\s+[A-Z]{2}\s*$', '')).Trim()
     }
 
-    return @{ Customer = $customer; Month = $month; Year = $year; SiteText = $siteText; Country = $country; DestText = $destBlock; Location = $location }
+    return @{ Customer = $customer; CustomerFull = $customerFull; Month = $month; Year = $year; SiteText = $siteText; Country = $country; DestText = $destBlock; Location = $location }
 }
 
 function Get-DestBlock([string]$t) {
@@ -2471,6 +2478,31 @@ function Score-Name([string]$a, [string]$b) {
     return 0
 }
 
+function Score-Customer([hashtable]$info, [string]$folder) {
+    $sc = Score-Name $info.Customer $folder
+    if ($sc -ge 40) { return $sc }
+    $full = $info.CustomerFull
+    if (-not $full) { return $sc }
+    $words = @((Normalize-Name $full) -split ' ' | Where-Object { $_.Length -ge 3 })
+    $short = @((Normalize-Name $info.Customer) -split ' ')
+    $nf = Normalize-Name $folder
+    if (-not $nf -or $words.Count -eq 0) { return $sc }
+    $fTokens = @($nf -split ' ' | Where-Object { $_.Length -ge 3 })
+    if ($fTokens.Count -eq 0) { return $sc }
+    for ($i = 0; $i -lt $words.Count; $i++) {
+        if ($short -contains $words[$i]) { continue }
+        foreach ($t in $fTokens) {
+            if ($t -eq $words[$i]) {
+                $late = 39 - $i
+                if ($late -lt 20) { $late = 20 }
+                if ($late -gt $sc) { return $late }
+                return $sc
+            }
+        }
+    }
+    return $sc
+}
+
 function Get-MatchLocation([hashtable]$info) {
     if ($info.Location) { return $info.Location }
     if ($info.DestText) { return $info.DestText }
@@ -2487,7 +2519,7 @@ function Find-BestBase([string]$root, [hashtable]$info) {
     $site = Get-MatchLocation $info
     $best = $null; $bestScore = 0
     foreach ($ud in (Get-ChildItem -LiteralPath $countryDir -Directory -ErrorAction SilentlyContinue)) {
-        $sc = (Score-Name $info.Customer $ud.Name) + (Score-FolderSite $ud.Name $site) * 15
+        $sc = (Score-Customer $info $ud.Name) + (Score-FolderSite $ud.Name $site) * 15
         if ($sc -gt $bestScore) { $bestScore = $sc; $best = $ud.FullName }
     }
     if ($best) { return $best }
@@ -2678,7 +2710,7 @@ function Resolve-StartFolder([string]$root, [hashtable]$info) {
             $my = Test-FolderMonth $c.Name $info.Month $info.Year
             $si = Score-FolderSite $c.Name $locMatch
             $cu = 0
-            if ((Score-Name $info.Customer $c.Name) -ge 40) { $cu = 1 }
+            if ((Score-Customer $info $c.Name) -ge 20) { $cu = 1 }
             $sc = $my * 10 + $si * 2 + $cu * 3
             if ($my -lt 0) { $sc = -1 }
             if ($sc -gt $bestScore) { $bestScore = $sc; $bestChild = $c.FullName; $bestMy = $my }
