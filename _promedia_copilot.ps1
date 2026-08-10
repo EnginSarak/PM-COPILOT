@@ -1828,7 +1828,7 @@ function ConvertTo-FuKunde([string]$s) {
         }
     }
     if ($merged.Count -eq 0) { return '' }
-    $take = [math]::Min(2, $merged.Count)
+    $take = [math]::Min(3, $merged.Count)
     return (@($merged)[0..($take - 1)] -join '_')
 }
 
@@ -2367,7 +2367,7 @@ function Get-DeliveryInfo([string]$path) {
 
     $rawName = Get-DestName $t
     $cparts = @($rawName -replace '[\\/:*?"<>|]', ' ' -split '\s+' | Where-Object { $_ -ne '' -and $_ -notmatch '^[&+]+$' -and $_ -notmatch '^(and|und)$' })
-    if ($cparts.Count -gt 2) { $cparts = $cparts[0..1] }
+    if ($cparts.Count -gt 4) { $cparts = $cparts[0..3] }
     $customer = ($cparts -join ' ')
 
     $siteSb = New-Object System.Text.StringBuilder
