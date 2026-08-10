@@ -1716,7 +1716,7 @@ function Print-Pdf([string]$path, [string]$printerName, [int]$copies) {
     foreach ($b in $bitmaps) { $b.Dispose() }
 }
 
-function Get-OcrPageText([string]$path) {
+function Get-OcrPageText([string]$path, [int]$pageIndex = 0) {
     Add-Type -AssemblyName System.Runtime.WindowsRuntime | Out-Null
 
     $asOp = [System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
@@ -1761,8 +1761,9 @@ function Get-OcrPageText([string]$path) {
     $pdfTask.Wait(-1) | Out-Null
     $pdf = $pdfTask.Result
     if ($pdf.PageCount -lt 1) { throw "The PDF has no pages." }
+    if ($pageIndex -ge [int]$pdf.PageCount) { return '' }
 
-    $page = $pdf.GetPage([uint32]0)
+    $page = $pdf.GetPage([uint32]$pageIndex)
     $ras = New-Object Windows.Storage.Streams.InMemoryRandomAccessStream
     $opts = New-Object Windows.Data.Pdf.PdfPageRenderOptions
     $maxDim = [double][Windows.Media.Ocr.OcrEngine]::MaxImageDimension
@@ -1840,7 +1841,7 @@ function Get-FuInfo([string]$ocrText) {
     $hasAx = $ocrText -match '(?i)AX[I1l]UM'
 
     $orders = New-Object System.Collections.Generic.List[string]
-    $prefixRx = [regex]'(?i)\b(?:S[O0]RD[ \t]*(\d{2})|(TRN)[ \t]*[-.]?[ \t]*[O0]RD)[ \t]*[-.:]?[ \t]*'
+    $prefixRx = [regex]'(?i)\b(?:[S5][O0]RD[ \t]*(\d{2})|(TRN)[ \t]*[-.]?[ \t]*[O0]RD)[ \t]*[-.:]?[ \t]*'
     foreach ($m in $prefixRx.Matches($ocrText)) {
         $isTrn = $m.Groups[2].Success
         $sufPat = '0\d{4}'
@@ -1932,6 +1933,15 @@ function Invoke-FuScan {
         }
 
         $info = Get-FuInfo $text
+        if (-not $info.IsFu) {
+            $pg = 1
+            while (-not $info.IsFu -and $pg -le 2) {
+                $extra = ''
+                try { $extra = Get-OcrPageText $f.FullName $pg } catch { }
+                if ($extra) { $info = Get-FuInfo ($text + "`n" + $extra) }
+                $pg++
+            }
+        }
         if (-not $info.IsFu) {
             Write-Host ("  skipped (no " + $FuPrefix + " recognized): " + $f.Name) -ForegroundColor DarkGray
             $skipped++
