@@ -8,7 +8,6 @@ _doc_wizard_printed.txt
 _doc_wizard_update.txt
 ~$*
 *.tmp
-CLAUDE.md
 render.py
 shots.py
 __pycache__/
