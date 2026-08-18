@@ -159,6 +159,18 @@ PROMEDIA COPILOT/
 
 ## Changelog
 
+### 1.3.0
+
+- FÜ scan now reads every page of a scan (up to 6) instead of only the first
+  one, so a bundle holding several delivery notes gets all its order numbers
+  in the file name: a scan with `SORD26-00321` and `SORD26-00384` is now named
+  `FÜ_..._SORD26-00321_384_...` instead of dropping the second order.
+- Only pages that are actually an AXIUM delivery note or packing list are
+  counted for the order numbers, so references from an attached CMR or VGM
+  page no longer end up in the name.
+- Replaces the earlier workaround that only looked at later pages when the
+  first page was unreadable; reading all pages covers that case too.
+
 ### 1.2.0
 
 - The folder name is now a required field when filing: "New folder here (own

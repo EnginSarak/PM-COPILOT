@@ -926,7 +926,7 @@ function Stop-Spin($spin) {
     try { [Console]::Write("`r" + (' ' * 78) + "`r") } catch { }
 }
 
-$script:AppVersion = '1.2.0'
+$script:AppVersion = '1.3.0'
 
 function Get-PdfTjTokens([string]$path) {
     $bytes = [System.IO.File]::ReadAllBytes($path)
@@ -1716,7 +1716,7 @@ function Print-Pdf([string]$path, [string]$printerName, [int]$copies) {
     foreach ($b in $bitmaps) { $b.Dispose() }
 }
 
-function Get-OcrPageText([string]$path, [int]$pageIndex = 0) {
+function Get-OcrPages([string]$path, [int]$maxPages = 6) {
     Add-Type -AssemblyName System.Runtime.WindowsRuntime | Out-Null
 
     $asOp = [System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
@@ -1761,46 +1761,67 @@ function Get-OcrPageText([string]$path, [int]$pageIndex = 0) {
     $pdfTask.Wait(-1) | Out-Null
     $pdf = $pdfTask.Result
     if ($pdf.PageCount -lt 1) { throw "The PDF has no pages." }
-    if ($pageIndex -ge [int]$pdf.PageCount) { return '' }
 
-    $page = $pdf.GetPage([uint32]$pageIndex)
-    $ras = New-Object Windows.Storage.Streams.InMemoryRandomAccessStream
-    $opts = New-Object Windows.Data.Pdf.PdfPageRenderOptions
+    $count = [int]$pdf.PageCount
+    if ($maxPages -gt 0 -and $count -gt $maxPages) { $count = $maxPages }
     $maxDim = [double][Windows.Media.Ocr.OcrEngine]::MaxImageDimension
-    $scale = 3.0
-    if ($page.Size.Width * $scale -gt $maxDim) { $scale = $maxDim / $page.Size.Width }
-    if ($page.Size.Height * $scale -gt $maxDim) { $scale = $maxDim / $page.Size.Height }
-    $opts.DestinationWidth = [uint32]([math]::Floor($page.Size.Width * $scale))
-    $renderAct = $page.RenderToStreamAsync($ras, $opts)
-    $renderTask = $asAct.Invoke($null, @($renderAct))
-    $renderTask.Wait(-1) | Out-Null
+    $pages = New-Object System.Collections.Generic.List[string]
 
-    $ras.Seek(0)
-    $decOp = [Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($ras)
-    $decTask = $asOp.MakeGenericMethod([Windows.Graphics.Imaging.BitmapDecoder]).Invoke($null, @($decOp))
-    $decTask.Wait(-1) | Out-Null
-    $decoder = $decTask.Result
+    for ($p = 0; $p -lt $count; $p++) {
+        $page = $pdf.GetPage([uint32]$p)
+        $ras = New-Object Windows.Storage.Streams.InMemoryRandomAccessStream
+        $opts = New-Object Windows.Data.Pdf.PdfPageRenderOptions
+        $scale = 3.0
+        if ($page.Size.Width * $scale -gt $maxDim) { $scale = $maxDim / $page.Size.Width }
+        if ($page.Size.Height * $scale -gt $maxDim) { $scale = $maxDim / $page.Size.Height }
+        $opts.DestinationWidth = [uint32]([math]::Floor($page.Size.Width * $scale))
+        $renderAct = $page.RenderToStreamAsync($ras, $opts)
+        $renderTask = $asAct.Invoke($null, @($renderAct))
+        $renderTask.Wait(-1) | Out-Null
 
-    $bmpOp = $decoder.GetSoftwareBitmapAsync([Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8, [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied)
-    $bmpTask = $asOp.MakeGenericMethod([Windows.Graphics.Imaging.SoftwareBitmap]).Invoke($null, @($bmpOp))
-    $bmpTask.Wait(-1) | Out-Null
-    $bitmap = $bmpTask.Result
+        $ras.Seek(0)
+        $decOp = [Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($ras)
+        $decTask = $asOp.MakeGenericMethod([Windows.Graphics.Imaging.BitmapDecoder]).Invoke($null, @($decOp))
+        $decTask.Wait(-1) | Out-Null
+        $decoder = $decTask.Result
 
-    $ocrOp = $engine.RecognizeAsync($bitmap)
-    $ocrTask = $asOp.MakeGenericMethod([Windows.Media.Ocr.OcrResult]).Invoke($null, @($ocrOp))
-    $ocrTask.Wait(-1) | Out-Null
-    $result = $ocrTask.Result
+        $bmpOp = $decoder.GetSoftwareBitmapAsync([Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8, [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied)
+        $bmpTask = $asOp.MakeGenericMethod([Windows.Graphics.Imaging.SoftwareBitmap]).Invoke($null, @($bmpOp))
+        $bmpTask.Wait(-1) | Out-Null
+        $bitmap = $bmpTask.Result
 
-    $sb = New-Object System.Text.StringBuilder
-    foreach ($ln in $result.Lines) {
-        [void]$sb.AppendLine($ln.Text)
+        $ocrOp = $engine.RecognizeAsync($bitmap)
+        $ocrTask = $asOp.MakeGenericMethod([Windows.Media.Ocr.OcrResult]).Invoke($null, @($ocrOp))
+        $ocrTask.Wait(-1) | Out-Null
+        $result = $ocrTask.Result
+
+        $sb = New-Object System.Text.StringBuilder
+        foreach ($ln in $result.Lines) {
+            [void]$sb.AppendLine($ln.Text)
+        }
+        $pages.Add($sb.ToString())
+
+        try { $bitmap.Dispose() } catch { }
+        try { $page.Dispose() } catch { }
+        try { $ras.Dispose() } catch { }
     }
-    try { $bitmap.Dispose() } catch { }
-    try { $page.Dispose() } catch { }
-    try { $ras.Dispose() } catch { }
+
     try { $inStream.Dispose() } catch { }
     try { $ms.Dispose() } catch { }
-    return $sb.ToString()
+    return $pages.ToArray()
+}
+
+function Get-OcrPageText([string]$path, [int]$pageIndex = 0) {
+    $pages = @(Get-OcrPages $path ($pageIndex + 1))
+    if ($pageIndex -ge $pages.Count) { return '' }
+    return $pages[$pageIndex]
+}
+
+function Get-FuDocText([string[]]$pages) {
+    if (-not $pages -or $pages.Count -eq 0) { return '' }
+    $doc = @($pages | Where-Object { $_ -match '(?i)(PW[S5]\s*\d|PAC\s*\d|AX[I1l]UM)' })
+    if ($doc.Count -eq 0) { $doc = $pages }
+    return ($doc -join "`n")
 }
 
 function ConvertTo-FuKunde([string]$s) {
@@ -1924,7 +1945,7 @@ function Invoke-FuScan {
         $text = $null
         $err = ''
         $ok = $true
-        try { $text = Get-OcrPageText $f.FullName } catch { $ok = $false; $err = $_.Exception.GetBaseException().Message }
+        try { $text = Get-FuDocText (Get-OcrPages $f.FullName 6) } catch { $ok = $false; $err = $_.Exception.GetBaseException().Message }
         Stop-Spin $spin
         if (-not $ok) {
             Write-Host ("  ERROR reading " + $f.Name + ": " + $err) -ForegroundColor Red
@@ -1933,15 +1954,6 @@ function Invoke-FuScan {
         }
 
         $info = Get-FuInfo $text
-        if (-not $info.IsFu) {
-            $pg = 1
-            while (-not $info.IsFu -and $pg -le 2) {
-                $extra = ''
-                try { $extra = Get-OcrPageText $f.FullName $pg } catch { }
-                if ($extra) { $info = Get-FuInfo ($text + "`n" + $extra) }
-                $pg++
-            }
-        }
         if (-not $info.IsFu) {
             Write-Host ("  skipped (no " + $FuPrefix + " recognized): " + $f.Name) -ForegroundColor DarkGray
             $skipped++
