@@ -159,6 +159,17 @@ PROMEDIA COPILOT/
 
 ## Changelog
 
+### 1.4.2
+
+- Auto move FÜ documents now reads the whole scan instead of only its first
+  page. When a scan starts with a CMR and the delivery note is on page 2, the
+  country and location were read off the CMR: a shipment to Ljubljana showed
+  `Country: DE` and `Location: LETRE DE VOITURE`. It now takes the delivery
+  note page wherever it sits, and still reads only page 1 when that page
+  already is the delivery note, so nothing gets slower in the normal case.
+- The French CMR label `Destinataire` is no longer mistaken for the
+  `Destination` field of a delivery note.
+
 ### 1.4.1
 
 - Fixed the destination country and location being read wrong on FÜ documents.

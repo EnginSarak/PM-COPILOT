@@ -926,7 +926,7 @@ function Stop-Spin($spin) {
     try { [Console]::Write("`r" + (' ' * 78) + "`r") } catch { }
 }
 
-$script:AppVersion = '1.4.1'
+$script:AppVersion = '1.4.2'
 
 function Get-PdfTjTokens([string]$path) {
     $bytes = [System.IO.File]::ReadAllBytes($path)
@@ -2003,7 +2003,7 @@ function Get-FuDestLines([string[]]$lines) {
     $stop = '(?i)(^\s*(product|item\b|reference|descript|notes|q\.?ty|u\.?m\b|lot\s*no|expiry|goods|package|gross|net\s|withdrawal|driver|recipient|connected|sold\s*to|page\b)|ax[i1l]um|customer.?s\s*(po|code))'
     $out = New-Object System.Collections.Generic.List[string]
     for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -notmatch '(?i)destinat') { continue }
+        if ($lines[$i] -notmatch '(?i)destinat(?!aire)') { continue }
         for ($j = $i + 1; $j -lt $lines.Count -and $out.Count -lt 5; $j++) {
             $raw = $lines[$j].Trim()
             if (-not $raw) { continue }
@@ -2045,7 +2045,10 @@ function Get-FuDestCountry([string[]]$addr) {
 }
 
 function Get-FuMoveInfo($f) {
-    $text = Get-OcrPageText $f.FullName
+    $text = Get-FuDocText (Get-OcrPages $f.FullName 1)
+    if (-not (($text -match '(?i)ax[i1l]um') -and ($text -match '(?i)destinat(?!aire)'))) {
+        $text = Get-FuDocText (Get-OcrPages $f.FullName 6)
+    }
     $lines = @($text -split '\r?\n')
 
     $destLines = @(Get-FuDestLines $lines)
