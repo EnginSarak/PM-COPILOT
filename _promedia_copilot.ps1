@@ -926,7 +926,7 @@ function Stop-Spin($spin) {
     try { [Console]::Write("`r" + (' ' * 78) + "`r") } catch { }
 }
 
-$script:AppVersion = '1.4.0'
+$script:AppVersion = '1.4.1'
 
 function Get-PdfTjTokens([string]$path) {
     $bytes = [System.IO.File]::ReadAllBytes($path)
@@ -1999,30 +1999,57 @@ function Invoke-FuScan {
     Write-Host ("   Errors  : " + $failed) -ForegroundColor $failColor
 }
 
+function Get-FuDestLines([string[]]$lines) {
+    $stop = '(?i)(^\s*(product|item\b|reference|descript|notes|q\.?ty|u\.?m\b|lot\s*no|expiry|goods|package|gross|net\s|withdrawal|driver|recipient|connected|sold\s*to|page\b)|ax[i1l]um|customer.?s\s*(po|code))'
+    $out = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -notmatch '(?i)destinat') { continue }
+        for ($j = $i + 1; $j -lt $lines.Count -and $out.Count -lt 5; $j++) {
+            $raw = $lines[$j].Trim()
+            if (-not $raw) { continue }
+            if ($raw -match $stop) { break }
+            $v = $raw -replace '(?i)marienh\S*[\s\d]*siegen\s*\(?\s*57080\s*\)?\s*DE\b', ' '
+            $v = $v -replace '(?i)marienh\S*|siegen|\(?\s*57080\s*\)?', ' '
+            $v = $v -replace '(?i)pick.?up|addres+\w*|aderes+\w*', ' '
+            $v = $v -replace '(?i)incoterms?|carrier|transport\s*reason|shipment\s*method|doc\.\s*(type|no\.?|date)', ' '
+            $v = $v -replace '(?i)\bPW[S5]\d+\b|\bPAC\d+\b', ' '
+            $v = $v -replace '\b\d{2}\.\d{2}\.\d{4}\b', ' '
+            $v = ($v -replace '\s{2,}', ' ').Trim()
+            if (-not $v) { continue }
+            $out.Add($v)
+        }
+        break
+    }
+    return $out.ToArray()
+}
+
+function Get-FuDestCountry([string[]]$addr) {
+    if (-not $addr -or $addr.Count -eq 0) { return "" }
+    for ($i = $addr.Count - 1; $i -ge 0; $i--) {
+        $m = [regex]::Match($addr[$i], '\b([A-Z]{2})\s*$')
+        if ($m.Success -and $IsoCountry.ContainsKey($m.Groups[1].Value)) { return $m.Groups[1].Value }
+    }
+    foreach ($l in $addr) {
+        $m = [regex]::Match($l, '\b([A-Za-z]{2})-\d{3,5}\b')
+        if ($m.Success) {
+            $cc = $m.Groups[1].Value.ToUpper()
+            if ($IsoCountry.ContainsKey($cc)) { return $cc }
+        }
+    }
+    $found = ""
+    foreach ($mm in [regex]::Matches(($addr -join "`n"), '\b([A-Z]{2})\b')) {
+        if ($IsoCountry.ContainsKey($mm.Groups[1].Value)) { $found = $mm.Groups[1].Value }
+    }
+    if ($found) { return $found }
+    return (Get-CountryCode ($addr -join ' '))
+}
+
 function Get-FuMoveInfo($f) {
     $text = Get-OcrPageText $f.FullName
     $lines = @($text -split '\r?\n')
 
-    $destLines = New-Object System.Collections.Generic.List[string]
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -notmatch '(?i)destinat') { continue }
-        for ($j = $i + 1; $j -lt $lines.Count -and $destLines.Count -lt 6; $j++) {
-            $v = $lines[$j].Trim()
-            if (-not $v) { continue }
-            if ($v -match '(?i)^(product|reference|descript|notes|carrier|gross|q\.?ty|u\.?m)') { break }
-            $v = ($v -replace '(?i)marienh\S*|siegen|\(?57080\)?|pick.?up|addres+\w*|aderes+\w*', ' ').Trim()
-            if (-not $v) { continue }
-            $destLines.Add($v)
-        }
-        break
-    }
+    $destLines = @(Get-FuDestLines $lines)
     $destText = ($destLines -join "`n")
-
-    $country = ''
-    foreach ($mm in [regex]::Matches($destText, '\b([A-Z]{2})\b')) {
-        $cc = $mm.Groups[1].Value
-        if ($IsoCountry.ContainsKey($cc)) { $country = $cc }
-    }
 
     $addr = New-Object System.Collections.Generic.List[string]
     foreach ($dl in $destLines) {
@@ -2030,10 +2057,20 @@ function Get-FuMoveInfo($f) {
         $addr.Add($dl)
     }
     while ($addr.Count -gt 1 -and $addr[$addr.Count - 1] -match '^[A-Z]{2}$') { $addr.RemoveAt($addr.Count - 1) }
+
+    $country = Get-FuDestCountry $addr.ToArray()
+
     $location = ''
     if ($addr.Count -gt 0) {
         $location = $addr[$addr.Count - 1]
         while ($location -match '\s+[A-Z]{2}\s*$') { $location = ([regex]::Replace($location, '\s+[A-Z]{2}\s*$', '')).Trim() }
+        for ($k = 0; $k -lt 2; $k++) {
+            $location = $location -replace '^\s*[A-Za-z]{2}-\d{3,5}\s*', ''
+            $location = $location -replace '^\s*\d{4,5}\s+[A-Z]{2}\s+', ''
+            $location = $location -replace '^\s*\d{4,6}\s+', ''
+            $location = $location -replace '^\s*\d{1,3}\s+', ''
+        }
+        $location = $location.Trim()
     }
 
     $month = 0
@@ -2708,10 +2745,10 @@ function Find-MonthFolderDeep([string]$container, [int]$month, [string]$year, [i
             if ($mv -ge 3) { return $d.FullName }
             if ($mv -eq 2 -and $node.Ctx -eq $year -and -not $best) { $best = $d.FullName }
             if (($node.Depth + 1) -lt $maxDepth) {
-                $ctx = $node.Ctx
                 $fy = Get-FolderYear $d.Name
-                if ($fy -and (Get-FolderMonth $d.Name) -eq 0) { $ctx = $fy }
-                $queue.Add(@{ Path = $d.FullName; Depth = $node.Depth + 1; Ctx = $ctx })
+                if ($fy -and (Get-FolderMonth $d.Name) -eq 0) {
+                    $queue.Add(@{ Path = $d.FullName; Depth = $node.Depth + 1; Ctx = $fy })
+                }
             }
         }
     }

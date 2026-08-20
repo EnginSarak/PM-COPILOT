@@ -1,5 +1,5 @@
-VERSION=1.4.0
-NOTE=Move to folders now finds a month folder nested inside a year folder and offers to open it instead of suggesting to create a new one
+VERSION=1.4.1
+NOTE=Fixes the wrong destination country and location on FU documents, and stops Open existing from offering a month folder of an unrelated customer
 FILE=_promedia_copilot.ps1
 FILE=PROMEDIA COPILOT.bat
 FILE=reset.bat

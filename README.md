@@ -159,6 +159,22 @@ PROMEDIA COPILOT/
 
 ## Changelog
 
+### 1.4.1
+
+- Fixed the destination country and location being read wrong on FÜ documents.
+  The address block could run into the product table, and `AXIUM's SO` was then
+  taken as the country code `SO` (Somalia) with `AXIUM's` shown as the location.
+  The block now stops at the table, and the country is taken from the code at
+  the end of an address line instead of any two letters found anywhere.
+- Fixed the `DE` of the Siegen pick-up address being used as the destination
+  country when OCR put it on the same line as the delivery address.
+- The location no longer carries the postcode: `2685 NZ Bleiswijk` now shows as
+  `Bleiswijk`, `SI-1000 Ljubljana` as `Ljubljana`.
+- Fixed "Open existing" from 1.4.0 offering a month folder from an unrelated
+  customer or country, e.g. `Poland\August 2026` for a shipment to the
+  Netherlands. The search now only looks inside year folders, which is the
+  nesting it was meant to cover.
+
 ### 1.4.0
 
 - Move to folders now looks inside the subfolders before offering to create a
