@@ -926,7 +926,7 @@ function Stop-Spin($spin) {
     try { [Console]::Write("`r" + (' ' * 78) + "`r") } catch { }
 }
 
-$script:AppVersion = '1.3.0'
+$script:AppVersion = '1.4.0'
 
 function Get-PdfTjTokens([string]$path) {
     $bytes = [System.IO.File]::ReadAllBytes($path)
@@ -2694,6 +2694,30 @@ function Suggest-MonthFolder([string]$container, [int]$month, [string]$year) {
     return ($MonthsDE[$month - 1] + " " + $year)
 }
 
+function Find-MonthFolderDeep([string]$container, [int]$month, [string]$year, [int]$maxDepth) {
+    if (-not $container -or -not (Test-Path -LiteralPath $container)) { return "" }
+    $best = ""
+    $queue = New-Object System.Collections.Generic.List[object]
+    $queue.Add(@{ Path = $container; Depth = 0; Ctx = "" })
+    $i = 0
+    while ($i -lt $queue.Count) {
+        $node = $queue[$i]
+        $i++
+        foreach ($d in @(Get-ChildItem -LiteralPath $node.Path -Directory -ErrorAction SilentlyContinue)) {
+            $mv = Test-FolderMonth $d.Name $month $year
+            if ($mv -ge 3) { return $d.FullName }
+            if ($mv -eq 2 -and $node.Ctx -eq $year -and -not $best) { $best = $d.FullName }
+            if (($node.Depth + 1) -lt $maxDepth) {
+                $ctx = $node.Ctx
+                $fy = Get-FolderYear $d.Name
+                if ($fy -and (Get-FolderMonth $d.Name) -eq 0) { $ctx = $fy }
+                $queue.Add(@{ Path = $d.FullName; Depth = $node.Depth + 1; Ctx = $ctx })
+            }
+        }
+    }
+    return $best
+}
+
 function Resolve-CreateTarget([string]$cur, [int]$month, [string]$year) {
     $p = $cur
     if ((Get-FolderMonth (Split-Path $p -Leaf)) -ne 0) { $p = Split-Path $p -Parent }
@@ -2908,17 +2932,25 @@ function Move-PairInteractive([string]$root, [string]$startDir, [string]$title, 
         }
 
         $monthExists = $false
+        $foundMonth = ""
         if (-not $needYear) {
             if ((Test-FolderMonth (Split-Path $cur -Leaf) $month $year) -ge 2) {
                 $monthExists = $true
             } else {
-                foreach ($d in @(Get-ChildItem -LiteralPath $effContainer -Directory -ErrorAction SilentlyContinue)) {
-                    if ((Test-FolderMonth $d.Name $month $year) -ge 2) { $monthExists = $true; break }
-                }
+                $foundMonth = Find-MonthFolderDeep $effContainer $month $year 2
+                if ($foundMonth) { $monthExists = $true }
             }
         }
         $createEntry = @{ Text = ("[ + Create folder: " + $suggest + " ]" + $createHint); Header = $false; Act = "CREATE" }
 
+        if ($foundMonth) {
+            $base = $effContainer.TrimEnd('\')
+            $rel = $foundMonth
+            if ($foundMonth.StartsWith($base, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $rel = $foundMonth.Substring($base.Length).TrimStart('\')
+            }
+            $entries.Add(@{ Text = ("[ -> Open existing: " + $rel + " ]"); Header = $false; Act = ("DIR|" + $foundMonth) })
+        }
         if (-not $monthExists) { $entries.Add($createEntry) }
         $entries.Add(@{ Text = "[ Move here ]"; Header = $false; Act = "SELECT" })
         if ($cur.TrimEnd('\').Length -gt $root.TrimEnd('\').Length) {

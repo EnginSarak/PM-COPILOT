@@ -159,6 +159,18 @@ PROMEDIA COPILOT/
 
 ## Changelog
 
+### 1.4.0
+
+- Move to folders now looks inside the subfolders before offering to create a
+  month folder. A folder like `August 2026` sitting inside a `2026` year folder
+  used to stay invisible, so "Create folder" was suggested first even though the
+  folder was already there.
+- When such a folder is found it is offered at the top as
+  `[ -> Open existing: 2026\August 2026 ]`, and "Create folder" moves down below
+  "Move here". A month folder named just `August` counts too when it sits in a
+  year folder for the right year.
+- The search goes two levels deep, which keeps it quick on a network drive.
+
 ### 1.3.0
 
 - FÜ scan now reads every page of a scan (up to 6) instead of only the first
