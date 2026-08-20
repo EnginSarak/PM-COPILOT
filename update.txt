@@ -1,5 +1,5 @@
-VERSION=1.4.1
-NOTE=Fixes the wrong destination country and location on FU documents, and stops Open existing from offering a month folder of an unrelated customer
+VERSION=1.4.2
+NOTE=Auto move FU documents now finds the delivery note on any page, so a scan that starts with a CMR no longer gets the wrong country and location
 FILE=_promedia_copilot.ps1
 FILE=PROMEDIA COPILOT.bat
 FILE=reset.bat
