@@ -1,5 +1,5 @@
-VERSION=1.4.2
-NOTE=Auto move FU documents now finds the delivery note on any page, so a scan that starts with a CMR no longer gets the wrong country and location
+VERSION=1.4.3
+NOTE=Pump list now recognizes bin codes without a shelf number such as PWKS, instead of filing their serials under the previous bin
 FILE=_promedia_copilot.ps1
 FILE=PROMEDIA COPILOT.bat
 FILE=reset.bat

@@ -159,6 +159,16 @@ PROMEDIA COPILOT/
 
 ## Changelog
 
+### 1.4.3
+
+- Fixed bin codes without a shelf number, such as `PWKS`, being missed in the
+  pump list. Only codes shaped like `M12J1.1` were recognized, so every serial
+  taken from `PWKS` was filed under the last bin seen before it: on WP004660
+  that put 381 serials under `M13J1.2`, which actually holds 31.
+- The bin is now read from the column next to the `Take` / `Place` action
+  instead of being guessed from the shape of its name, so any bin code the
+  warehouse uses is picked up.
+
 ### 1.4.2
 
 - Auto move FÜ documents now reads the whole scan instead of only its first
