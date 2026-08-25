@@ -926,7 +926,7 @@ function Stop-Spin($spin) {
     try { [Console]::Write("`r" + (' ' * 78) + "`r") } catch { }
 }
 
-$script:AppVersion = '1.4.2'
+$script:AppVersion = '1.4.3'
 
 function Get-PdfTjTokens([string]$path) {
     $bytes = [System.IO.File]::ReadAllBytes($path)
@@ -964,6 +964,18 @@ function Get-PumpDataFromPdf([string]$path) {
         if (-not $res.Kunde -and $v -eq 'Destination') {
             $nx = $i + 1
             if ($nx -lt $toks.Count) { $res.Kunde = $toks[$nx].Trim() }
+        }
+
+        if ($v -eq 'Take' -or $v -eq 'Place') {
+            $nx = $i + 1
+            while ($nx -lt $toks.Count -and -not $toks[$nx]) { $nx++ }
+            if ($nx -lt $toks.Count) {
+                $cand = $toks[$nx].Trim()
+                if ($cand.Length -le 20 -and $cand -match '^[A-Z][A-Z0-9]*(\.\d+)?$' -and $cand -notmatch '^N\d{8,}$') {
+                    $curBin = $cand
+                }
+            }
+            continue
         }
 
         if ($v -match '^(PICKING|[A-Z][A-Z0-9]{0,6}\d\.\d+)$') { $curBin = $v; continue }
