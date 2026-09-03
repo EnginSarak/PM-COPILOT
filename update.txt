@@ -1,5 +1,5 @@
-VERSION=1.4.3
-NOTE=Pump list now recognizes bin codes without a shelf number such as PWKS, instead of filing their serials under the previous bin
+VERSION=1.5.0
+NOTE=Print now opens the pump list of a pick list for manual printing, the same way it already opened the groupage sheet
 FILE=_promedia_copilot.ps1
 FILE=PROMEDIA COPILOT.bat
 FILE=reset.bat
