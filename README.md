@@ -159,6 +159,17 @@ PROMEDIA COPILOT/
 
 ## Changelog
 
+### 1.5.0
+
+- Print now opens the pump list of a pick list as well, the same way it
+  already opened the groupage sheet, so it can be printed by hand. Pump lists
+  are Excel files and cannot go to the printer directly, so they were simply
+  never offered.
+- A pick list that has a pump list says so in the print menu
+  (`+ 1 pump list(s)`).
+- A groupage now opens its groupage sheet **and** the pump lists of all pick
+  lists in it, instead of the groupage sheet alone.
+
 ### 1.4.3
 
 - Fixed bin codes without a shelf number, such as `PWKS`, being missed in the

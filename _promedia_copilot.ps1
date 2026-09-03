@@ -926,7 +926,7 @@ function Stop-Spin($spin) {
     try { [Console]::Write("`r" + (' ' * 78) + "`r") } catch { }
 }
 
-$script:AppVersion = '1.4.3'
+$script:AppVersion = '1.5.0'
 
 function Get-PdfTjTokens([string]$path) {
     $bytes = [System.IO.File]::ReadAllBytes($path)
@@ -2302,14 +2302,19 @@ function Invoke-Print {
             $done = $printed.Contains($g.Id)
             $t = $g.Label
             if ($done) { $t = $t + "   [printed]" }
-            $entries.Add(@{ Text = $t; Header = $false; Paths = $g.Paths; Copies = 1; Id = $g.Id; Done = $done; Open = $g.Xlsx })
+            $openList = New-Object System.Collections.Generic.List[string]
+            if ($g.HasXlsx) { $openList.Add($g.Xlsx) }
+            foreach ($u in (Get-PumpXlsxFor $g.Names)) { $openList.Add($u) }
+            $entries.Add(@{ Text = $t; Header = $false; Paths = $g.Paths; Copies = 1; Id = $g.Id; Done = $done; Open = $openList.ToArray() })
         }
         foreach ($f in $wp) {
             if ($covered.ContainsKey($f.Name)) { continue }
             $done = $printed.Contains($f.Name)
+            $pumps = @(Get-PumpXlsxFor @($f.Name))
             $t = $f.Name
+            if ($pumps.Count -gt 0) { $t = $t + "   + " + $pumps.Count + " pump list(s)" }
             if ($done) { $t = $t + "   [printed]" }
-            $entries.Add(@{ Text = $t; Header = $false; Paths = @($f.FullName); Copies = 1; Id = $f.Name; Done = $done })
+            $entries.Add(@{ Text = $t; Header = $false; Paths = @($f.FullName); Copies = 1; Id = $f.Name; Done = $done; Open = $pumps })
         }
         $entries.Add(@{ Text = ""; Header = $true })
         $entries.Add(@{ Text = "Back"; Header = $false; Paths = $null; Copies = 0 })
@@ -2342,9 +2347,11 @@ function Invoke-Print {
                 }
             }
         }
-        if ($chosen.Open -and (Test-Path -LiteralPath $chosen.Open)) {
-            Write-Host ("  Opening " + [System.IO.Path]::GetFileName($chosen.Open) + " (print it manually)") -ForegroundColor Cyan
-            try { Start-Process -FilePath $chosen.Open } catch { }
+        foreach ($o in @($chosen.Open)) {
+            if (-not $o) { continue }
+            if (-not (Test-Path -LiteralPath $o)) { continue }
+            Write-Host ("  Opening " + [System.IO.Path]::GetFileName($o) + " (print it manually)") -ForegroundColor Cyan
+            try { Start-Process -FilePath $o } catch { }
         }
         if ($allOk -and $chosen.Id) {
             [void]$printed.Add($chosen.Id)
