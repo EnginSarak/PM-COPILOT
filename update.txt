@@ -1,0 +1,9 @@
+VERSION=1.0.0
+NOTE=Initial release
+FILE=_promedia_copilot.ps1
+FILE=PROMEDIA COPILOT.bat
+FILE=reset.bat
+FILE=pumplist_template.xlsx
+FILE=pump_control_template.xlsx
+FILE=groupage_template.xlsx
+FILE=promedia_copilot.ico

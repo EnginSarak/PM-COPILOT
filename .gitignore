@@ -1,0 +1,13 @@
+_promedia_copilot_settings.txt
+_promedia_copilot_pairs.txt
+_promedia_copilot_printed.txt
+_promedia_copilot_update.txt
+_doc_wizard_settings.txt
+_doc_wizard_pairs.txt
+_doc_wizard_printed.txt
+_doc_wizard_update.txt
+~$*
+*.tmp
+render.py
+shots.py
+__pycache__/
