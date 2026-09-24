@@ -926,7 +926,7 @@ function Stop-Spin($spin) {
     try { [Console]::Write("`r" + (' ' * 78) + "`r") } catch { }
 }
 
-$script:AppVersion = '1.0.0'
+$script:AppVersion = '1.1.0'
 $script:UpdateRepoRaw = 'https://raw.githubusercontent.com/EnginSarak/PM-COPILOT/main'
 
 function Compare-AppVersion([string]$a, [string]$b) {
@@ -2605,6 +2605,95 @@ function Get-DestCountry([string]$destBlock) {
     return (Get-CountryCode $destBlock)
 }
 
+$UnitsDe = [System.Globalization.CultureInfo]::GetCultureInfo('de-DE')
+
+function ConvertFrom-DeNumber([string]$v) {
+    $x = ($v -replace '\s', '') -replace '\.', '' -replace ',', '.'
+    $d = 0.0
+    if ([double]::TryParse($x, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$d)) { return $d }
+    return $null
+}
+
+function Find-NearToken($toks, [int]$at, [string]$pattern) {
+    if ($at -lt 0) { return $null }
+    for ($o = 1; $o -le 12; $o++) {
+        foreach ($i in @(($at + $o), ($at - $o))) {
+            if ($i -ge 0 -and $i -lt $toks.Count -and $toks[$i] -match $pattern) { return $toks[$i] }
+        }
+    }
+    return $null
+}
+
+function Get-PackKey([string]$type) {
+    $v = $type.Trim().ToUpper()
+    if ($v -match '^(PAL|PALLET|PALLETS|PALETTE|PALETTEN|PL|EP|EPAL|EUR)$') { return 'Pallet' }
+    if ($v -match '^(CT|CTN|CTNS|CARTON|CARTONS|KARTON|KARTONS)$') { return 'CT (carton)' }
+    return $v
+}
+
+function Get-ShipmentUnits([string]$path) {
+    try { $t = Get-PdfText $path } catch { return $null }
+    $toks = New-Object System.Collections.Generic.List[string]
+    foreach ($m in [regex]::Matches($t, '\(((?:[^()\\]|\\.)*)\)\s*Tj')) {
+        $toks.Add(($m.Groups[1].Value -replace '\\\(', '(' -replace '\\\)', ')').Trim())
+    }
+
+    $weights = New-Object System.Collections.Generic.List[double]
+    $packAt = -1; $typeAt = -1
+    for ($i = 0; $i -lt $toks.Count; $i++) {
+        $v = $toks[$i]
+        if ($v -match '^(\d[\d.]*(?:,\d+)?)\s*KG$') {
+            $w = ConvertFrom-DeNumber $matches[1]
+            if ($null -ne $w) { $weights.Add($w) }
+        }
+        elseif ($packAt -lt 0 -and $v -match '^Packages No\.?$') { $packAt = $i }
+        elseif ($typeAt -lt 0 -and $v -match '^Goods Appearance$') { $typeAt = $i }
+    }
+
+    $numRx = '^\d{1,3}(?:\.\d{3})*,\d{2}$'
+    $typeRx = '(?i)^(pallets?|palette|paletten|pal|pl|ep|epal|eur|ct|ctn|ctns|cs|cartons?|kartons?|box|boxes|colli|pkg|parcels?)$'
+    $looseRx = '(?i)^(pallets?|palette|paletten|ct|ctn|cartons?|kartons?)$'
+    $packTok = Find-NearToken $toks $packAt $numRx
+    $typeTok = Find-NearToken $toks $typeAt $typeRx
+    if (-not $typeTok) { foreach ($v in $toks) { if ($v -match $looseRx) { $typeTok = $v; break } } }
+
+    $count = $null
+    if ($packTok) { $count = ConvertFrom-DeNumber $packTok }
+    $net = $null; $gross = $null
+    if ($weights.Count -gt 0) {
+        $gross = ($weights | Measure-Object -Maximum).Maximum
+        $lo = ($weights | Measure-Object -Minimum).Minimum
+        if ($lo -lt $gross) { $net = $lo }
+    }
+    if ($null -eq $count -and -not $typeTok -and $null -eq $gross) { return $null }
+    return @{ Type = $typeTok; Count = $count; Net = $net; Gross = $gross }
+}
+
+function Format-Units($members) {
+    $byType = [ordered]@{}
+    $net = 0.0; $gross = 0.0; $hasNet = $false; $hasGross = $false
+    foreach ($m in $members) {
+        $u = Get-ShipmentUnits $m.Src.FullName
+        if (-not $u) { continue }
+        if ($null -ne $u.Count) {
+            $key = 'units'
+            if ($u.Type) { $key = Get-PackKey $u.Type }
+            if (-not $byType.Contains($key)) { $byType[$key] = 0.0 }
+            $byType[$key] += $u.Count
+        }
+        if ($null -ne $u.Net) { $net += $u.Net; $hasNet = $true }
+        if ($null -ne $u.Gross) { $gross += $u.Gross; $hasGross = $true }
+    }
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($k in $byType.Keys) { $parts.Add($byType[$k].ToString('0.##', $UnitsDe) + ' ' + $k) }
+    $out = @{ Units = ($parts -join ' + '); Weight = '' }
+    $w = New-Object System.Collections.Generic.List[string]
+    if ($hasNet) { $w.Add('Net ' + $net.ToString('#,##0.##', $UnitsDe) + ' kg') }
+    if ($hasGross) { $w.Add('Gross ' + $gross.ToString('#,##0.##', $UnitsDe) + ' kg') }
+    $out.Weight = ($w -join '   ')
+    return $out
+}
+
 function Normalize-Name([string]$n) {
     if (-not $n) { return "" }
     $x = $n.ToLower()
@@ -3062,6 +3151,8 @@ function Move-PairInteractive([string]$root, [string]$startDir, [string]$title, 
         $entries.Add(@{ Text = ("  Customer: " + $info.Customer); Header = $true })
         $entries.Add(@{ Text = ("  Location: " + $locShow); Header = $true })
         $entries.Add(@{ Text = ("  Country : " + (Get-CountryLabel $info.Country)); Header = $true })
+        if ($info.Units) { $entries.Add(@{ Text = ("  Units   : " + $info.Units); Header = $true }) }
+        if ($info.Weight) { $entries.Add(@{ Text = ("  Weight  : " + $info.Weight); Header = $true }) }
         $entries.Add(@{ Text = ""; Header = $true })
         $entries.Add(@{ Text = ("Current: " + $cur); Header = $true })
         $entries.Add(@{ Text = ""; Header = $true })
@@ -3419,6 +3510,9 @@ function Invoke-Move {
             } else {
                 $title = $cust + "   (" + $g.Members[0].Detail + ")    Date: " + $monthLabel
             }
+            $fu = Format-Units $g.Members
+            $info.Units = $fu.Units
+            $info.Weight = $fu.Weight
             $start = Resolve-StartFolder $script:__root $info
             $res = Move-PairInteractive $script:__root $start $title $info $g.Paths
             if ($res -eq "MOVED") { $did = $g.Paths.Count }

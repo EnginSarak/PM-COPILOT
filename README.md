@@ -2,7 +2,7 @@
 
 <img src="docs/01-main-menu.png" alt="PROMEDIA COPILOT" width="520"/>
 
-**PROMEDIA COPILOT** · Version 1.0.0
+**PROMEDIA COPILOT** · Version 1.1.0
 
 *A PowerShell-based tool that automates renaming, printing, filing and Excel generation for warehouse pick lists and delivery notes*
 
@@ -11,7 +11,7 @@
 ![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)
 ![Excel](https://img.shields.io/badge/Excel-COM%20interop-217346?logo=microsoftexcel&logoColor=white)
-![Version](https://img.shields.io/badge/version-1.0.0-blue)
+![Version](https://img.shields.io/badge/version-1.1.0-blue)
 
 </div>
 
@@ -90,7 +90,9 @@ sheet. Control files get their own section and go to the pump control folder, no
 print queue. Delivery documents are routed by reading the destination address, country
 and date out of the PDF, including addresses drawn with an embedded font, and
 suggesting the matching month folder; the customer, location and country found in the
-document are shown so the target can be checked before filing. Deliveries going to the
+document are shown so the target can be checked before filing. Below the address it
+also shows how many packages the delivery has and in which unit (pallets and cartons `CT`
+are kept apart), plus net and gross weight, summed over all delivery notes in the entry. Deliveries going to the
 same customer, location and country are grouped into one entry and moved together.
 Plain year folders (e.g. `2026`) used only as an end-of-year archive are never treated
 as a filing target; new month folders always go beside them, and when a month folder
@@ -158,6 +160,10 @@ PROMEDIA COPILOT/
 ---
 
 ## Changelog
+
+### 1.1.0
+
+- Move to folders: packages with unit (pallet, `CT`, ...) and net/gross weight are read from the delivery note and shown under the address. Grouped deliveries are summed per unit.
 
 ### 1.0.0
 

@@ -1,5 +1,5 @@
-VERSION=1.0.0
-NOTE=Initial release
+VERSION=1.1.0
+NOTE=Move shows packages, unit and weight of each delivery
 FILE=_promedia_copilot.ps1
 FILE=PROMEDIA COPILOT.bat
 FILE=reset.bat
