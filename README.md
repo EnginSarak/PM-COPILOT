@@ -2,7 +2,7 @@
 
 <img src="docs/01-main-menu.png" alt="PROMEDIA COPILOT" width="520"/>
 
-**PROMEDIA COPILOT** · Version 1.1.0
+**PROMEDIA COPILOT** · Version 1.2.0
 
 *A PowerShell-based tool that automates renaming, printing, filing and Excel generation for warehouse pick lists and delivery notes*
 
@@ -11,7 +11,7 @@
 ![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)
 ![Excel](https://img.shields.io/badge/Excel-COM%20interop-217346?logo=microsoftexcel&logoColor=white)
-![Version](https://img.shields.io/badge/version-1.1.0-blue)
+![Version](https://img.shields.io/badge/version-1.2.0-blue)
 
 </div>
 
@@ -128,6 +128,17 @@ Code → Download ZIP → unpack → run "PROMEDIA COPILOT.bat"
 
 First start asks for folders and printer once.
 
+### Update
+
+The tool never connects to the internet on its own. To update:
+
+1. Download the new version: **Code → Download ZIP** (`PM-COPILOT-main.zip`)
+2. Put the ZIP as it is (**do not unpack it**) into the folder where `PROMEDIA COPILOT.bat` is
+3. Start the tool: it finds the ZIP, shows the new version and asks to install it
+
+Settings, pairs and printed markers stay as they are. The ZIP is deleted after the
+update; an update file that is not newer than the installed version is removed too.
+
 ---
 
 ## Tech stack
@@ -147,7 +158,7 @@ PROMEDIA COPILOT/
 ├── PROMEDIA COPILOT.bat         starts the tool
 ├── _promedia_copilot.ps1        the program
 ├── reset.bat                   clears personal settings
-├── update.txt                  version + file list for the updater
+├── update.txt                  version + file list for the offline update
 ├── pumplist_template.xlsx      pump list template
 ├── pump_control_template.xlsx  scan control template
 ├── groupage_template.xlsx      groupage sheet template
@@ -160,6 +171,14 @@ PROMEDIA COPILOT/
 ---
 
 ## Changelog
+
+### 1.2.0
+
+- Removed the online update check. The tool no longer connects to GitHub on startup
+  or from the menu, and the "Check for updates" menu item is gone.
+- New offline update: put the downloaded ZIP (`PM-COPILOT-main.zip`) into the folder
+  of `PROMEDIA COPILOT.bat`, and on the next start the tool offers to install it,
+  replaces its files, deletes the ZIP and restarts. Settings are kept.
 
 ### 1.1.0
 

@@ -1,5 +1,5 @@
-VERSION=1.1.0
-NOTE=Move shows packages, unit and weight of each delivery
+VERSION=1.2.0
+NOTE=No more internet access: updates are installed from a ZIP placed next to the .bat file
 FILE=_promedia_copilot.ps1
 FILE=PROMEDIA COPILOT.bat
 FILE=reset.bat
