@@ -926,8 +926,7 @@ function Stop-Spin($spin) {
     try { [Console]::Write("`r" + (' ' * 78) + "`r") } catch { }
 }
 
-$script:AppVersion = '1.1.0'
-$script:UpdateRepoRaw = 'https://raw.githubusercontent.com/EnginSarak/PM-COPILOT/main'
+$script:AppVersion = '1.2.0'
 
 function Compare-AppVersion([string]$a, [string]$b) {
     $pa = @($a -split '\.' | ForEach-Object { try { [int]$_ } catch { 0 } })
@@ -940,80 +939,113 @@ function Compare-AppVersion([string]$a, [string]$b) {
     return 0
 }
 
-function Get-RemoteUpdateInfo {
+# Offline update: a ZIP of the tool (GitHub "Download ZIP") placed next to the .bat. No internet access.
+function Get-ZipUpdateInfo([string]$zipPath) {
+    $zip = $null
     try {
-        $resp = Invoke-WebRequest -Uri ($script:UpdateRepoRaw + '/update.txt') -UseBasicParsing -TimeoutSec 8
-    } catch { return $null }
-    $info = @{ Version = ''; Note = ''; Files = New-Object System.Collections.Generic.List[string] }
-    foreach ($ln in ($resp.Content -split '\r?\n')) {
-        if ($ln -match '^VERSION=(.+)$') { $info.Version = $matches[1].Trim() }
-        elseif ($ln -match '^NOTE=(.+)$') { $info.Note = $matches[1].Trim() }
-        elseif ($ln -match '^FILE=(.+)$') { $info.Files.Add($matches[1].Trim()) }
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+        $manifest = @($zip.Entries | Where-Object { $_.Name -eq 'update.txt' } |
+            Sort-Object { ($_.FullName -split '/').Count }) | Select-Object -First 1
+        if (-not $manifest) { return $null }
+        $prefix = $manifest.FullName.Substring(0, $manifest.FullName.Length - 'update.txt'.Length)
+
+        $sr = New-Object System.IO.StreamReader($manifest.Open())
+        try { $text = $sr.ReadToEnd() } finally { $sr.Dispose() }
+
+        $info = @{ Zip = $zipPath; Prefix = $prefix; Version = ''; Note = ''; Files = New-Object System.Collections.Generic.List[string] }
+        foreach ($ln in ($text -split '\r?\n')) {
+            if ($ln -match '^VERSION=(.+)$') { $info.Version = $matches[1].Trim() }
+            elseif ($ln -match '^NOTE=(.+)$') { $info.Note = $matches[1].Trim() }
+            elseif ($ln -match '^FILE=(.+)$') { $info.Files.Add($matches[1].Trim()) }
+        }
+        if (-not $info.Version -or -not $info.Files.Contains('_promedia_copilot.ps1')) { return $null }
+        $names = @($zip.Entries | ForEach-Object { $_.FullName })
+        foreach ($f in $info.Files) { if ($names -notcontains ($prefix + $f)) { return $null } }
+        return $info
+    } catch {
+        return $null
+    } finally {
+        if ($zip) { $zip.Dispose() }
     }
-    if (-not $info.Version -or $info.Files.Count -eq 0) { return $null }
-    return $info
 }
 
-function Invoke-ApplyUpdate([hashtable]$info) {
-    $tmp = Join-Path $env:TEMP ('pmcopilot_update_' + [guid]::NewGuid().ToString('N'))
-    try { New-Item -ItemType Directory -Path $tmp -ErrorAction Stop | Out-Null } catch { return $false }
-
-    foreach ($f in $info.Files) {
-        try {
-            $url = $script:UpdateRepoRaw + '/' + ($f -replace ' ', '%20')
-            Invoke-WebRequest -Uri $url -OutFile (Join-Path $tmp $f) -UseBasicParsing -TimeoutSec 30
-        } catch {
-            Write-Host ('  Download failed: ' + $f + '  (' + $_.Exception.Message + ')') -ForegroundColor Red
-            try { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue } catch { }
-            return $false
+function Install-ZipUpdate([hashtable]$info) {
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('pmcopilot_update_' + [guid]::NewGuid().ToString('N'))
+    $zip = $null
+    try {
+        New-Item -ItemType Directory -Path $tmp -ErrorAction Stop | Out-Null
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($info.Zip)
+        foreach ($f in $info.Files) {
+            $entry = $zip.GetEntry($info.Prefix + $f)
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $tmp $f), $true)
         }
+    } catch {
+        Write-Host ('   Could not read the update file: ' + $_.Exception.Message) -ForegroundColor Red
+        if ($zip) { $zip.Dispose() }
+        try { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+        return $false
     }
+    $zip.Dispose()
 
     $ok = $true
     foreach ($f in $info.Files) {
-        try { Copy-Item -LiteralPath (Join-Path $tmp $f) -Destination (Join-Path $AppDir $f) -Force }
-        catch { Write-Host ('  Could not replace ' + $f + ': ' + $_.Exception.Message) -ForegroundColor Red; $ok = $false }
+        try { Copy-Item -LiteralPath (Join-Path $tmp $f) -Destination (Join-Path $AppDir $f) -Force -ErrorAction Stop }
+        catch { Write-Host ('   Could not replace ' + $f + ': ' + $_.Exception.Message) -ForegroundColor Red; $ok = $false }
     }
     try { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue } catch { }
     return $ok
 }
 
-function Invoke-UpdateCheck([bool]$manual) {
-    if (-not $manual) {
-        $today = (Get-Date).ToString('yyyy-MM-dd')
-        if ((Get-Setting 'LASTUPDATECHECK') -eq $today) { return }
+function Invoke-LocalUpdate {
+    $zips = @(Get-ChildItem -LiteralPath $AppDir -Filter '*.zip' -File -ErrorAction SilentlyContinue)
+    if ($zips.Count -eq 0) { return }
+    try {
+        Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+    } catch { return }
+
+    $best = $null
+    $stale = New-Object System.Collections.Generic.List[object]
+    foreach ($z in $zips) {
+        $info = Get-ZipUpdateInfo $z.FullName
+        if (-not $info) { continue }
+        if ((Compare-AppVersion $info.Version $script:AppVersion) -le 0) { $stale.Add($info); continue }
+        if (-not $best -or (Compare-AppVersion $info.Version $best.Version) -gt 0) {
+            if ($best) { $stale.Add($best) }
+            $best = $info
+        } else { $stale.Add($info) }
     }
 
-    $info = Get-RemoteUpdateInfo
-    if (-not $manual) { Set-Setting 'LASTUPDATECHECK' (Get-Date).ToString('yyyy-MM-dd') }
-
-    if (-not $info) {
-        if ($manual) { Write-Host "  Could not check for updates (no connection?)." -ForegroundColor Yellow }
-        return
+    foreach ($s in $stale) {
+        try {
+            Remove-Item -LiteralPath $s.Zip -Force -ErrorAction Stop
+            Write-Host ('   Removed old update file ' + (Split-Path $s.Zip -Leaf) + ' (Version ' + $s.Version + ', not newer than ' + $script:AppVersion + ').') -ForegroundColor DarkGray
+        } catch { }
     }
-    if ((Compare-AppVersion $info.Version $script:AppVersion) -le 0) {
-        if ($manual) { Write-Host ("  Already up to date (Version " + $script:AppVersion + ").") -ForegroundColor Green }
-        return
-    }
+    if (-not $best) { return }
 
     Write-Host ""
     Write-Host $light -ForegroundColor DarkCyan
-    Write-Host ("   UPDATE AVAILABLE:  " + $script:AppVersion + "  ->  " + $info.Version) -ForegroundColor Cyan
-    if ($info.Note) { Write-Host ("   " + $info.Note) -ForegroundColor DarkGray }
+    Write-Host ("   UPDATE FILE FOUND:  " + $script:AppVersion + "  ->  " + $best.Version) -ForegroundColor Cyan
+    Write-Host ("   " + (Split-Path $best.Zip -Leaf)) -ForegroundColor DarkGray
+    if ($best.Note) { Write-Host ("   " + $best.Note) -ForegroundColor DarkGray }
     Write-Host $light -ForegroundColor DarkCyan
     Write-Host ""
     $ans = Read-Host "   Install now? (Y/N)"
     if ($ans -notmatch '(?i)^y') { return }
 
-    Write-Host "   Downloading..." -ForegroundColor DarkGray
-    if (Invoke-ApplyUpdate $info) {
-        Write-Host ("   Updated to " + $info.Version + ". Restarting...") -ForegroundColor Green
+    if (Install-ZipUpdate $best) {
+        try { Remove-Item -LiteralPath $best.Zip -Force -ErrorAction Stop } catch { }
+        Write-Host ("   Updated to " + $best.Version + ". Restarting...") -ForegroundColor Green
         Start-Sleep -Seconds 1
         try { Start-Process -FilePath (Join-Path $AppDir "PROMEDIA COPILOT.bat") } catch { }
         $script:SkipPause = $true
         exit
     } else {
         Write-Host "   Update failed. Still running the current version." -ForegroundColor Red
+        Write-Host ""
+        Write-Host "   Press any key to continue..." -ForegroundColor DarkGray
+        [void][Console]::ReadKey($true)
     }
 }
 
@@ -3622,7 +3654,7 @@ function Invoke-Settings([bool]$requireAll) {
 
 $FuMenuLabel = $FuPrefix + " scan   (beta)"
 $FuMoveLabel = "Auto move " + $FuPrefix + " documents   (beta)"
-$mainItems = @("Auto rename/create documents", "Annotate WP documents", "Print", "Auto move to folders", $FuMenuLabel, $FuMoveLabel, "Settings", "Check for updates", "", "Quit")
+$mainItems = @("Auto rename/create documents", "Annotate WP documents", "Print", "Auto move to folders", $FuMenuLabel, $FuMoveLabel, "Settings", "", "Quit")
 
 $cfgWork = Get-Setting 'WORKDIR'
 if ($cfgWork -and (Test-Path -LiteralPath $cfgWork)) { $WorkDir = $cfgWork.TrimEnd('\') }
@@ -3631,7 +3663,7 @@ try {
     if (-not (Test-SetupComplete)) { Invoke-Settings $true }
 
     Invoke-Housekeeping
-    Invoke-UpdateCheck $false
+    Invoke-LocalUpdate
 
     while ($true) {
         $choice = Show-Menu "MAIN MENU" $mainItems
@@ -3659,7 +3691,6 @@ try {
             $FuMenuLabel            { Invoke-FuScan }
             $FuMoveLabel            { Invoke-FuMove }
             "Settings"              { Invoke-Settings $false }
-            "Check for updates"     { Invoke-UpdateCheck $true }
         }
 
         if (-not $script:SkipPause) {
