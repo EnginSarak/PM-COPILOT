@@ -926,7 +926,7 @@ function Stop-Spin($spin) {
     try { [Console]::Write("`r" + (' ' * 78) + "`r") } catch { }
 }
 
-$script:AppVersion = '1.2.0'
+$script:AppVersion = '1.2.1'
 
 function Compare-AppVersion([string]$a, [string]$b) {
     $pa = @($a -split '\.' | ForEach-Object { try { [int]$_ } catch { 0 } })
@@ -2646,16 +2646,6 @@ function ConvertFrom-DeNumber([string]$v) {
     return $null
 }
 
-function Find-NearToken($toks, [int]$at, [string]$pattern) {
-    if ($at -lt 0) { return $null }
-    for ($o = 1; $o -le 12; $o++) {
-        foreach ($i in @(($at + $o), ($at - $o))) {
-            if ($i -ge 0 -and $i -lt $toks.Count -and $toks[$i] -match $pattern) { return $toks[$i] }
-        }
-    }
-    return $null
-}
-
 function Get-PackKey([string]$type) {
     $v = $type.Trim().ToUpper()
     if ($v -match '^(PAL|PALLET|PALLETS|PALETTE|PALETTEN|PL|EP|EPAL|EUR)$') { return 'Pallet' }
@@ -2670,34 +2660,34 @@ function Get-ShipmentUnits([string]$path) {
         $toks.Add(($m.Groups[1].Value -replace '\\\(', '(' -replace '\\\)', ')').Trim())
     }
 
-    $weights = New-Object System.Collections.Generic.List[double]
-    $packAt = -1; $typeAt = -1
+    $packAt = -1
     for ($i = 0; $i -lt $toks.Count; $i++) {
-        $v = $toks[$i]
-        if ($v -match '^(\d[\d.]*(?:,\d+)?)\s*KG$') {
-            $w = ConvertFrom-DeNumber $matches[1]
-            if ($null -ne $w) { $weights.Add($w) }
-        }
-        elseif ($packAt -lt 0 -and $v -match '^Packages No\.?$') { $packAt = $i }
-        elseif ($typeAt -lt 0 -and $v -match '^Goods Appearance$') { $typeAt = $i }
+        if ($toks[$i] -match '^Packages No\.?$') { $packAt = $i; break }
     }
+    if ($packAt -lt 0) { return $null }
 
-    $numRx = '^\d{1,3}(?:\.\d{3})*,\d{2}$'
+    $kgRx = '^(\d[\d.]*(?:,\d+)?)\s*KG$'
+    $g = -1
+    for ($i = $packAt + 1; $i -lt $toks.Count - 1; $i++) {
+        if ($toks[$i] -match $kgRx -and $toks[$i + 1] -match $kgRx) { $g = $i; break }
+    }
+    if ($g -lt 0) { return $null }
+
+    $gross = ConvertFrom-DeNumber ($toks[$g] -replace '\s*KG$', '')
+    $net = ConvertFrom-DeNumber ($toks[$g + 1] -replace '\s*KG$', '')
+    if ($null -eq $gross -or $null -eq $net -or $net -gt $gross) { $gross = $null; $net = $null }
+
     $typeRx = '(?i)^(pallets?|palette|paletten|pal|pl|ep|epal|eur|ct|ctn|ctns|cs|cartons?|kartons?|box|boxes|colli|pkg|parcels?)$'
-    $looseRx = '(?i)^(pallets?|palette|paletten|ct|ctn|cartons?|kartons?)$'
-    $packTok = Find-NearToken $toks $packAt $numRx
-    $typeTok = Find-NearToken $toks $typeAt $typeRx
-    if (-not $typeTok) { foreach ($v in $toks) { if ($v -match $looseRx) { $typeTok = $v; break } } }
+    $typeTok = $null
+    if ($toks[$g - 1] -match $typeRx) { $typeTok = $toks[$g - 1] }
 
     $count = $null
-    if ($packTok) { $count = ConvertFrom-DeNumber $packTok }
-    $net = $null; $gross = $null
-    if ($weights.Count -gt 0) {
-        $gross = ($weights | Measure-Object -Maximum).Maximum
-        $lo = ($weights | Measure-Object -Minimum).Minimum
-        if ($lo -lt $gross) { $net = $lo }
+    if ($g + 2 -lt $toks.Count -and $toks[$g + 2] -match '^\d{1,3}(?:\.\d{3})*,\d{2}$') {
+        $count = ConvertFrom-DeNumber $toks[$g + 2]
     }
-    if ($null -eq $count -and -not $typeTok -and $null -eq $gross) { return $null }
+    if ($null -eq $typeTok) { $count = $null }
+
+    if ($null -eq $count -and $null -eq $gross) { return $null }
     return @{ Type = $typeTok; Count = $count; Net = $net; Gross = $gross }
 }
 
