@@ -2,7 +2,7 @@
 
 <img src="docs/01-main-menu.png" alt="PROMEDIA COPILOT" width="520"/>
 
-**PROMEDIA COPILOT** · Version 1.2.1
+**PROMEDIA COPILOT** · Version 1.2.2
 
 *A PowerShell-based tool that automates renaming, printing, filing and Excel generation for warehouse pick lists and delivery notes*
 
@@ -11,7 +11,7 @@
 ![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)
 ![Excel](https://img.shields.io/badge/Excel-COM%20interop-217346?logo=microsoftexcel&logoColor=white)
-![Version](https://img.shields.io/badge/version-1.2.1-blue)
+![Version](https://img.shields.io/badge/version-1.2.2-blue)
 
 </div>
 
@@ -171,6 +171,20 @@ PROMEDIA COPILOT/
 ---
 
 ## Changelog
+
+### 1.2.2
+
+- Fixed a failed move (e.g. the target file is still open elsewhere) not showing
+  any readable reason: moving a pick list, pump list or pump control file to a
+  busy destination silently reported it as moved, because `Move-Item`'s own
+  error does not stop the script unless told to. The move is now correctly
+  reported as failed, with the real reason, and the screen stays up until a key
+  is pressed instead of being redrawn away in a fraction of a second.
+- The same fix applies to renaming documents (option 1) and to renaming scanned
+  FÜ documents: a document that is open elsewhere is no longer silently marked
+  as renamed.
+- Creating a groupage sheet, pump list or pump control file now reports a
+  missing or locked Excel template clearly instead of a generic COM error.
 
 ### 1.2.1
 
