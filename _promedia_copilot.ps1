@@ -868,7 +868,7 @@ function Invoke-GroupageCheck {
             if (Test-Path -LiteralPath $newPath) {
                 Write-Host ("     exists already : " + $newName) -ForegroundColor DarkYellow
             } else {
-                Copy-Item -LiteralPath $tpl[0].FullName -Destination $newPath
+                Copy-Item -LiteralPath $tpl[0].FullName -Destination $newPath -ErrorAction Stop
                 try { Unblock-File -LiteralPath $newPath -ErrorAction SilentlyContinue } catch { }
                 Write-Host ("     created        : " + $newName) -ForegroundColor Green
 
@@ -926,7 +926,7 @@ function Stop-Spin($spin) {
     try { [Console]::Write("`r" + (' ' * 78) + "`r") } catch { }
 }
 
-$script:AppVersion = '1.2.1'
+$script:AppVersion = '1.2.2'
 
 function Compare-AppVersion([string]$a, [string]$b) {
     $pa = @($a -split '\.' | ForEach-Object { try { [int]$_ } catch { 0 } })
@@ -1183,13 +1183,13 @@ function New-ControlWorkbook($data) {
         $n++
     }
 
-    Copy-Item -LiteralPath $tpl.FullName -Destination $newPath
-    try { Unblock-File -LiteralPath $newPath -ErrorAction SilentlyContinue } catch { }
-
     $spin = Start-Spin ("building " + $newName + " in Excel...")
     $xl = $null
     $wbT = $null
     try {
+        Copy-Item -LiteralPath $tpl.FullName -Destination $newPath -ErrorAction Stop
+        try { Unblock-File -LiteralPath $newPath -ErrorAction SilentlyContinue } catch { }
+
         try { $xl = New-Object -ComObject Excel.Application } catch {
             throw "Microsoft Excel could not be started (COM). Is Excel installed?"
         }
@@ -1274,14 +1274,14 @@ function New-PumpWorkbook($data, [string]$srcName) {
         $n++
     }
 
-    Copy-Item -LiteralPath $tpl.FullName -Destination $newPath
-    try { Unblock-File -LiteralPath $newPath -ErrorAction SilentlyContinue } catch { }
-
     $spin = Start-Spin ("building " + $newName + " in Excel...")
     $xl = $null
     $wbT = $null
     $ok = $false
     try {
+        Copy-Item -LiteralPath $tpl.FullName -Destination $newPath -ErrorAction Stop
+        try { Unblock-File -LiteralPath $newPath -ErrorAction SilentlyContinue } catch { }
+
         try { $xl = New-Object -ComObject Excel.Application } catch {
             throw "Microsoft Excel could not be started (COM). Is Excel installed?"
         }
@@ -1488,15 +1488,20 @@ function Invoke-Rename {
             continue
         }
 
-        if ($caseOnly) {
-            $tmp = Join-Path $WorkDir ($newName + '.__case')
-            Move-Item -LiteralPath $f -Destination $tmp -Force
-            Move-Item -LiteralPath $tmp -Destination $target -Force
-        } else {
-            Move-Item -LiteralPath $f -Destination $target
+        try {
+            if ($caseOnly) {
+                $tmp = Join-Path $WorkDir ($newName + '.__case')
+                Move-Item -LiteralPath $f -Destination $tmp -Force -ErrorAction Stop
+                Move-Item -LiteralPath $tmp -Destination $target -Force -ErrorAction Stop
+            } else {
+                Move-Item -LiteralPath $f -Destination $target -ErrorAction Stop
+            }
+            Write-Host ("  " + $orig + "  ->  " + $newName) -ForegroundColor Green
+            $renamed++
+        } catch {
+            Write-Host ("  Could not rename " + $orig + ": " + $_.Exception.Message) -ForegroundColor Red
+            $fail++
         }
-        Write-Host ("  " + $orig + "  ->  " + $newName) -ForegroundColor Green
-        $renamed++
     }
 
     if ($pairs.Count -gt 0) {
@@ -2111,7 +2116,7 @@ function Invoke-FuScan {
         $ans = Read-Host "  Rename? (Y/N)"
         if ($ans -match '^\s*[yj]') {
             try {
-                Move-Item -LiteralPath $f.FullName -Destination $target
+                Move-Item -LiteralPath $f.FullName -Destination $target -ErrorAction Stop
                 Write-Host "    renamed." -ForegroundColor Green
                 $renamed++
             } catch {
@@ -3124,10 +3129,10 @@ function Select-Printer {
 
 function Move-FileSafe([string]$src, [string]$dest) {
     try {
-        Move-Item -LiteralPath $src -Destination $dest
+        Move-Item -LiteralPath $src -Destination $dest -ErrorAction Stop
         return $true
     } catch {
-        Write-Host ("  In use, not moved: " + [System.IO.Path]::GetFileName($src)) -ForegroundColor Red
+        Write-Host ("  Could not move " + [System.IO.Path]::GetFileName($src) + ": " + $_.Exception.Message) -ForegroundColor Red
         Write-Host "  Close it in the PDF viewer or preview pane, then run Move again." -ForegroundColor DarkGray
         return $false
     }
@@ -3308,17 +3313,23 @@ function Move-ControlFile([string]$path) {
     Write-Host ""
 
     $name = [System.IO.Path]::GetFileName($path)
-    if (-not (Test-Path -LiteralPath $path)) { return 0 }
-    $target = Join-Path $dest $name
-    if (Test-Path -LiteralPath $target) {
-        Write-Host ("  Target exists, skipped: " + $name) -ForegroundColor DarkYellow
-        return 0
+    $result = 0
+    if (-not (Test-Path -LiteralPath $path)) {
+        Write-Host ("  File no longer exists: " + $name) -ForegroundColor Red
+    } else {
+        $target = Join-Path $dest $name
+        if (Test-Path -LiteralPath $target) {
+            Write-Host ("  Target exists, skipped: " + $name) -ForegroundColor DarkYellow
+        } elseif (Move-FileSafe $path $target) {
+            Write-Host ("  Moved " + $name + " -> " + $dest) -ForegroundColor Green
+            $result = 1
+        }
     }
-    if (Move-FileSafe $path $target) {
-        Write-Host ("  Moved " + $name + " -> " + $dest) -ForegroundColor Green
-        return 1
-    }
-    return 0
+
+    Write-Host ""
+    Write-Host "   Press any key to continue..." -ForegroundColor DarkGray
+    [void][Console]::ReadKey($true)
+    return $result
 }
 
 function Move-WpBundle([string]$title, [string[]]$paths) {
@@ -3353,6 +3364,10 @@ function Move-WpBundle([string]$title, [string[]]$paths) {
             $n++
         }
     }
+
+    Write-Host ""
+    Write-Host "   Press any key to continue..." -ForegroundColor DarkGray
+    [void][Console]::ReadKey($true)
     return $n
 }
 
@@ -3519,8 +3534,10 @@ function Invoke-Move {
         $did = 0
         if ($e.Act -eq 'CTRL') {
             $did = Move-ControlFile $e.Path
+            $moved += $did
         } elseif ($e.Act -eq 'WP') {
             $did = Move-WpBundle $e.Title $e.Paths
+            $moved += $did
         } else {
             $g = $e.Data
             $info = $g.Info
@@ -3537,14 +3554,13 @@ function Invoke-Move {
             $info.Weight = $fu.Weight
             $start = Resolve-StartFolder $script:__root $info
             $res = Move-PairInteractive $script:__root $start $title $info $g.Paths
-            if ($res -eq "MOVED") { $did = $g.Paths.Count }
-        }
-
-        if ($did -gt 0) {
-            $moved += $did
-            Write-Host ""
-            Write-Host "   Press any key to continue..." -ForegroundColor DarkGray
-            [void][Console]::ReadKey($true)
+            if ($res -eq "MOVED") {
+                $did = $g.Paths.Count
+                $moved += $did
+                Write-Host ""
+                Write-Host "   Press any key to continue..." -ForegroundColor DarkGray
+                [void][Console]::ReadKey($true)
+            }
         }
     }
 
