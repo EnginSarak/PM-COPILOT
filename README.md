@@ -4,7 +4,7 @@
 
 **PROMEDIA COPILOT** · Version 1.2.2
 
-*A PowerShell-based tool that automates renaming, printing, filing and Excel generation for warehouse pick lists and delivery notes*
+*An internal PowerShell-based tool that automates renaming, printing, filing and Excel generation for warehouse pick lists and delivery notes*
 
 *By [Engin Sarak](https://github.com/EnginSarak)*
 
