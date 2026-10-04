@@ -20,14 +20,18 @@
 ## Table of Contents
 
 - [How it works](#how-it-works)
+- [Install](#install)
+- [First start](#first-start)
+- [Controls](#controls)
 - [Features](#features)
   - [Rename and create documents](#rename-and-create-documents)
+  - [Groupage](#groupage)
   - [Pump picks](#pump-picks)
+  - [Annotate pick lists](#annotate-pick-lists)
   - [Print](#print)
   - [Move to folders](#move-to-folders)
   - [Scanned documents (beta)](#scanned-documents-beta)
   - [Settings](#settings)
-- [Install](#install)
 - [Tech stack](#tech-stack)
 - [Project structure](#project-structure)
 - [Changelog](#changelog)
@@ -36,87 +40,27 @@
 
 ## How it works
 
-Business Central exports pick lists as PDFs with generic names like `Custom Picking
-List.pdf`. Getting them into the right filename, the right printer tray and the
-right folder is the same handful of steps every time, and building the pump list and
-scan sheet for a pump pick used to mean re-typing serial numbers by hand.
+Business Central saves pick lists and delivery notes as PDFs with names like `Custom Picking List.pdf` or `Delivery Note (2).pdf`. Every day the same steps follow: rename, mark groupages, build pump lists, print, file. PROMEDIA COPILOT reads the PDFs itself, pulls out order number, customer, address and serial numbers, and does the rest. It runs only on the local PC, needs no internet and sends nothing out.
 
-PROMEDIA COPILOT reads the PDFs directly and does all of that: renaming, stamping, printing,
-filing, and generating the Excel sheets from data already sitting in the file. No line
-list export, no copy-paste, no template hunting.
+A normal day:
 
-Single PowerShell script, no install beyond unzip, keyboard-driven menu, one COM call
-into Excel where a formula can't do the job.
+| Step | Menu item | What happens |
+| --- | --- | --- |
+| 1 | | Save the day's PDFs from Business Central to the Downloads folder |
+| 2 | **Auto rename/create documents** | Files get proper names, groupage sheets and pump lists are created |
+| 3 | **Annotate WP documents** | Optional notes for the warehouse, written onto the pick list |
+| 4 | **Print** | Delivery documents twice, pick lists once |
+| 5 | **Auto move to folders** | Every file goes to its folder |
+| 6 | **FÜ scan** / **Auto move FÜ documents** | Signed delivery notes scanned after pickup are renamed and filed |
 
----
+| Code | Document | Name after renaming |
+| --- | --- | --- |
+| **PWS** | Delivery note | `PWS004410_SORD26-00412.pdf` |
+| **PAC** | Packing list | `PAC004410_SORD26-00412.pdf` |
+| **WP** | Warehouse pick list | `WP004521_NESTLE_DE_SORD26-00412.pdf` |
+| **FÜ** | Signed delivery note, scanned after pickup | `FÜ_Nestle_DE_SORD26-00398_260930.pdf` |
 
-## Features
-
-### Rename and create documents
-
-<img src="docs/02-rename-groupage.png" width="620"/>
-
-Reads PAC / PWS / WP and the order number out of each PDF and renames it accordingly.
-When two or more pick lists share a customer, it flags it as a groupage, stamps the
-PDFs and builds the groupage sheet from the template with customer and pick numbers
-already filled in.
-
-### Pump picks
-
-<img src="docs/03-pump-list.png" width="620"/>
-
-If a pick list contains pumps, it offers to build two files straight from
-the PDF, no line list needed:
-
-- `Pumpen.xlsx`: serial numbers grouped by bin, with counts and a total. Rows still
-  sitting in the PICKING bin are excluded.
-- `Control.xlsx`: the scan sheet for the warehouse floor. A scanned serial turns
-  green, anything still red was missed.
-
-### Print
-
-<img src="docs/04-print.png" width="620"/>
-
-Delivery documents and warehouse picks in one list. Matched PAC/PWS pairs print
-together, deliveries twice, picks once. Anything already sent is marked so it doesn't
-go out twice by accident.
-
-### Move to folders
-
-<img src="docs/05-move.png" width="620"/>
-
-Each entry moves the full bundle: pick list with its pump list, groupage with its
-sheet. Control files get their own section and go to the pump control folder, not the
-print queue. Delivery documents are routed by reading the destination address, country
-and date out of the PDF, including addresses drawn with an embedded font, and
-suggesting the matching month folder; the customer, location and country found in the
-document are shown so the target can be checked before filing. Below the address it
-also shows how many packages the delivery has and in which unit (pallets and cartons `CT`
-are kept apart), plus net and gross weight, summed over all delivery notes in the entry. Deliveries going to the
-same customer, location and country are grouped into one entry and moved together.
-Plain year folders (e.g. `2026`) used only as an end-of-year archive are never treated
-as a filing target; new month folders always go beside them, and when a month folder
-doesn't exist yet, creating it is offered first.
-
-### Scanned documents (beta)
-
-<img src="docs/08-fu-scan.png" width="620"/>
-
-Warehouse staff scan the signed delivery note after every pickup, and those scans land
-in a folder with generic names. PROMEDIA COPILOT reads them with the OCR built into Windows,
-no internet connection, no extra software, recognizes the delivery note, and renames
-it the same way as the digital documents: `FÜ_<customer>_<order number>_<scan date>.pdf`.
-A second entry, **Auto move FÜ documents**, then files the renamed scans into the same
-customer/country folders as the regular delivery documents, using the destination
-address read from the scan.
-
-### Settings
-
-<img src="docs/06-settings.png" width="620"/>
-
-Folders and printer are asked once and stored next to the script, including the Halle M
-scan folder used by the scanned-documents feature. `reset.bat` clears all of it, run it
-before handing the folder to someone else.
+A delivery note and a packing list with the same number form a pair.
 
 ---
 
@@ -126,7 +70,7 @@ before handing the folder to someone else.
 Code → Download ZIP → unpack → run "PROMEDIA COPILOT.bat"
 ```
 
-First start asks for folders and printer once.
+The three Excel templates must stay in the folder under their names. For a desktop shortcut, right-click `PROMEDIA COPILOT.bat` → **Create shortcut**, move it to the desktop and set `promedia_copilot.ico` as its icon under **Properties → Change Icon**.
 
 ### Update
 
@@ -141,6 +85,152 @@ update; an update file that is not newer than the installed version is removed t
 
 ---
 
+## First start
+
+The first start asks once for printer and folders. A white entry still needs a value, a green one is set. **Continue** appears once everything required is green.
+
+<img src="docs/first-start.webp" width="620"/>
+
+| Setting | Purpose |
+| --- | --- |
+| **Downloads folder** | Where the PDFs from Business Central land |
+| **Default printer** | Printer for delivery documents and pick lists |
+| **Outbound main folder** | Root of the shipping folders: country, then customer |
+| **Pick list folder** | Where processed pick lists go, with their groupage sheets and pump lists |
+| **'Noch zu drucken' folder** | Optional second target for pick lists to be printed again later |
+| **Pump control folder** | Where the pump scan control files go |
+| **Halle M scan folder** | Where the scans of signed delivery notes land |
+| **Banner style** | Large banner or a single plain line |
+
+The outbound folder is searched by country, customer and, if present, location and month. Countries may be named in German, English or as a code (`Deutschland`, `Germany`, `DE`), and month folders are recognized in many spellings (`Oktober 2026`, `Okt 26`, `2026-10`).
+
+```
+O:\Outbound
+├── Deutschland
+│   └── Nestle DE
+│       ├── 2025                    year folder, archive only
+│       └── September 2026
+├── Frankreich
+│   └── Hemodia
+│       └── Oktober 2026
+└── Saudi Arabien
+    └── Tamer
+        ├── Jeddah
+        └── Riyadh
+```
+
+---
+
+## Controls
+
+Keyboard only: `↑` `↓` to move, `Enter` to select, `Esc` or `Backspace` to go back. Yes/no questions take `y` (or `j`) and `Enter`, anything else counts as no.
+
+<img src="docs/main-menu.webp" width="560"/>
+
+---
+
+## Features
+
+### Rename and create documents
+
+Reads PWS / PAC / WP numbers and order numbers out of every PDF in the Downloads folder and renames the files. A pick list gets the first two words of the customer name, a document with several orders gets the first order number plus the last four digits of the others (`SORD26-00405_0406`). Anything that is not a Business Central document stays untouched.
+
+<img src="docs/rename.webp" width="620"/>
+
+A delivery note without its packing list, or the other way round, shows up as a red line.
+
+<img src="docs/missing-pair.webp" width="560"/>
+
+Each run ends with a summary of renamed files, files already correct, errors and missing pairs.
+
+<img src="docs/rename-summary.webp" width="560"/>
+
+### Groupage
+
+Two or more pick lists for the same customer form a groupage. After a `y`, PROMEDIA COPILOT stamps **GROUPAGE** onto page 1 of each pick list and creates the groupage sheet from the template, with customer and pick numbers already filled in.
+
+<img src="docs/groupage-done.webp" width="620"/>
+
+The sheet opens in Excel on purpose: country, carrier, pallet count and planned pickup date are not on the pick list, so the team adds them, saves and closes Excel.
+
+<p>
+  <img src="docs/groupage-sheet.webp" width="48%"/>
+  <img src="docs/groupage-sheet-filled.webp" width="48%"/>
+</p>
+
+<img src="docs/groupage-stamp.webp" width="520"/>
+
+### Pump picks
+
+If a pick list contains pumps, PROMEDIA COPILOT offers two Excel files built straight from the serial numbers in the PDF:
+
+- `Pumpen.xlsx`: serial numbers grouped by bin, with counts and a total. Rows already in the PICKING bin are left out.
+- `Control.xlsx`: the scan sheet for the warehouse floor. A scanned serial turns green, anything still red was missed.
+
+<img src="docs/pumps.webp" width="620"/>
+
+<img src="docs/pump-list.webp" width="400"/>
+
+### Annotate pick lists
+
+**Annotate WP documents** writes notes for the warehouse onto page 1 of a pick list, line by line. `del` removes the last line, `cancel` aborts, an empty line saves. On a groupage the text goes below the stamp. The text is written into the PDF and cannot be removed afterwards.
+
+<img src="docs/annotate.webp" width="620"/>
+<img src="docs/annotate-saved.webp" width="620"/>
+
+<img src="docs/annotate-pdf.webp" width="520"/>
+
+### Print
+
+Delivery documents and warehouse picks in one list, sent straight to the configured printer. Delivery note and packing list print as two complete, sorted sets. Pick lists print once, a groupage as one entry with all its pick lists. Excel sheets open for a last check and are printed from Excel.
+
+<img src="docs/print.webp" width="560"/>
+<img src="docs/print-delivery.webp" width="560"/>
+
+Anything already sent is marked `[printed]`, so nothing goes out twice by accident. The marker disappears once the files have left the Downloads folder.
+
+<img src="docs/print-printed.webp" width="560"/>
+
+### Move to folders
+
+**Auto move to folders** files everything in three groups: delivery documents to the customer folder, pick lists with their pump list or groupage sheet to the pick list folder, and pump control files to the pump control folder.
+
+<img src="docs/move.webp" width="560"/>
+
+For delivery documents a small folder navigator opens. **From the document** shows the customer, location, country, packages (pallets and cartons `CT` counted separately) and net and gross weight read from the delivery notes. **Current** is the folder PROMEDIA COPILOT picked: country, customer, location and month, as far as matching folders exist. If the month folder is missing, creating it is offered first, named like the existing month folders.
+
+<img src="docs/move-navigator.webp" width="560"/>
+
+If the month folder exists, the navigator opens it directly and **Move here** is preselected. For customers with several locations it lands in the right one; one level up, the match is marked `<-- location`.
+
+<p>
+  <img src="docs/move-existing-month.webp" width="48%"/>
+  <img src="docs/move-location.webp" width="48%"/>
+</p>
+
+Plain year folders such as `2025` are treated as archive and never offered as a target. Deliveries to the same customer, location and country move together. A file that is open elsewhere is reported as failed with the reason instead of being skipped silently.
+
+<img src="docs/move-picks.webp" width="620"/>
+
+### Scanned documents (beta)
+
+The warehouse scans every signed delivery note after pickup, and the scans land in the Halle M folder with names like `doc0001.pdf`. **FÜ scan** reads them with the OCR built into Windows, no internet and no extra software, and proposes a name: `FÜ_<customer>_<order number>_<scan date>.pdf`. Each one is confirmed with `y`.
+
+<img src="docs/fu-scan.webp" width="560"/>
+<img src="docs/fu-scan-summary.webp" width="560"/>
+
+**Auto move FÜ documents** files the renamed scans into the same customer folders as the delivery documents, using the address and the date read from the scan. OCR on paper is never perfect, so every proposal is worth a quick look.
+
+<img src="docs/fu-move.webp" width="620"/>
+
+### Settings
+
+Printer and folders can be changed at any time, in the same list as on first start. They are stored next to the script. `reset.bat` clears everything; run it before handing the folder to someone else.
+
+<img src="docs/settings.webp" width="620"/>
+
+---
+
 ## Tech stack
 
 | Layer | What |
@@ -148,6 +238,7 @@ update; an update file that is not newer than the installed version is removed t
 | Runtime | PowerShell 5.1, Windows Console API |
 | Spreadsheets | Excel COM interop |
 | PDF parsing | Manual PDF stream inflate + text-token extraction, no external library |
+| OCR | Windows.Media.Ocr, built into Windows |
 
 ---
 
@@ -157,6 +248,7 @@ update; an update file that is not newer than the installed version is removed t
 PROMEDIA COPILOT/
 ├── PROMEDIA COPILOT.bat         starts the tool
 ├── _promedia_copilot.ps1        the program
+├── promedia_copilot.ico         icon for a desktop shortcut
 ├── reset.bat                   clears personal settings
 ├── update.txt                  version + file list for the offline update
 ├── pumplist_template.xlsx      pump list template
