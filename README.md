@@ -70,6 +70,8 @@ A delivery note and a packing list with the same number form a pair.
 Code → Download ZIP → unpack → run "PROMEDIA COPILOT.bat"
 ```
 
+The user guide comes with the download as a PDF in German and English (`PM-COPILOT-HB-DE-001_Benutzerhandbuch_Rev1.0.pdf`, `PM-COPILOT-HB-EN-001_User_Guide_Rev1.0.pdf`).
+
 The three Excel templates must stay in the folder under their names. For a desktop shortcut, right-click `PROMEDIA COPILOT.bat` → **Create shortcut**, move it to the desktop and set `promedia_copilot.ico` as its icon under **Properties → Change Icon**.
 
 ### Update
@@ -254,6 +256,8 @@ PROMEDIA COPILOT/
 ├── pumplist_template.xlsx      pump list template
 ├── pump_control_template.xlsx  scan control template
 ├── groupage_template.xlsx      groupage sheet template
+├── PM-COPILOT-HB-DE-001_Benutzerhandbuch_Rev1.0.pdf   user guide, German
+├── PM-COPILOT-HB-EN-001_User_Guide_Rev1.0.pdf        user guide, English
 └── docs/                       screenshots used above
 ```
 
