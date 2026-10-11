@@ -7,3 +7,5 @@ FILE=pumplist_template.xlsx
 FILE=pump_control_template.xlsx
 FILE=groupage_template.xlsx
 FILE=promedia_copilot.ico
+FILE=PM-COPILOT-HB-DE-001_Benutzerhandbuch_Rev1.0.pdf
+FILE=PM-COPILOT-HB-EN-001_User_Guide_Rev1.0.pdf
