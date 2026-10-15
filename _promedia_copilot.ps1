@@ -637,6 +637,17 @@ function Get-DestName([string]$text) {
     return ""
 }
 
+function Convert-NameAlias([string]$v) {
+    if (-not $v) { return $v }
+    return ([regex]::Replace($v, '(?i)(?<![A-Za-z])FAROUK[\s_]+MAAMOUN(?![A-Za-z])', 'Tamer'))
+}
+
+function Remove-RegionCode([string]$v) {
+    if (-not $v) { return $v }
+    $v = [regex]::Replace($v, '\(\s*[A-Za-z]{2}\s*\)', ' ')
+    return ($v -replace '[ \t]{2,}', ' ').Trim()
+}
+
 function Get-Kunde([string]$text) {
     $v = Get-DestName $text
     if (-not $v) { return $null }
@@ -644,7 +655,7 @@ function Get-Kunde([string]$text) {
     $parts = @($v -split '\s+' | Where-Object { $_ -ne '' -and $_ -notmatch '^[&+]+$' -and $_ -notmatch '^(and|und)$' })
     if ($parts.Count -eq 0) { return $null }
     if ($parts.Count -gt 2) { $parts = $parts[0..1] }
-    return ($parts -join '_')
+    return (Convert-NameAlias ($parts -join '_'))
 }
 
 function Get-PwsFromPdf([string]$path) {
@@ -926,7 +937,7 @@ function Stop-Spin($spin) {
     try { [Console]::Write("`r" + (' ' * 78) + "`r") } catch { }
 }
 
-$script:AppVersion = '1.2.2'
+$script:AppVersion = '1.2.3'
 
 function Compare-AppVersion([string]$a, [string]$b) {
     $pa = @($a -split '\.' | ForEach-Object { try { [int]$_ } catch { 0 } })
@@ -1119,7 +1130,7 @@ function Format-KundeName([string]$v) {
     $parts = @($v -split '\s+' | Where-Object { $_ -ne '' -and $_ -notmatch '^[&+]+$' -and $_ -notmatch '^(?i)(and|und)$' })
     if ($parts.Count -eq 0) { return '' }
     if ($parts.Count -gt 2) { $parts = $parts[0..1] }
-    return ($parts -join '_')
+    return (Convert-NameAlias ($parts -join '_'))
 }
 
 function Set-SheetArray($ws, [int]$startRow, [int]$startCol, $arr) {
@@ -1988,7 +1999,7 @@ function ConvertTo-FuKunde([string]$s) {
     }
     if ($merged.Count -eq 0) { return '' }
     $take = [math]::Min(2, $merged.Count)
-    return (@($merged)[0..($take - 1)] -join '_')
+    return (Convert-NameAlias (@($merged)[0..($take - 1)] -join '_'))
 }
 
 function Get-FuInfo([string]$ocrText) {
@@ -2190,16 +2201,17 @@ function Get-FuMoveInfo($f) {
     $lines = @($text -split '\r?\n')
 
     $destLines = @(Get-FuDestLines $lines)
-    $destText = ($destLines -join "`n")
+    $destText = Remove-RegionCode ($destLines -join "`n")
 
     $addr = New-Object System.Collections.Generic.List[string]
     foreach ($dl in $destLines) {
-        if ($dl -match '^\d{1,3}$') { continue }
+        $dl = Remove-RegionCode $dl
+        if (-not $dl -or $dl -match '^\d{1,3}$') { continue }
         $addr.Add($dl)
     }
-    while ($addr.Count -gt 1 -and $addr[$addr.Count - 1] -match '^[A-Z]{2}$') { $addr.RemoveAt($addr.Count - 1) }
 
     $country = Get-FuDestCountry $addr.ToArray()
+    while ($addr.Count -gt 1 -and $addr[$addr.Count - 1] -match '^[A-Z]{2}$') { $addr.RemoveAt($addr.Count - 1) }
 
     $location = ''
     if ($addr.Count -gt 0) {
@@ -2588,7 +2600,7 @@ function Get-DeliveryInfo([string]$path) {
 
     $addr = New-Object System.Collections.Generic.List[string]
     foreach ($line in ($destBlock -split "`n")) {
-        $lt = $line.Trim()
+        $lt = Remove-RegionCode $line
         if (-not $lt) { continue }
         if ($lt -match '^(Delivery Note|Packing List|Page|Truck|Destination|Sold To|Ship To|Deliver To|Customer)$') { continue }
         if ($lt -match '^\d{1,3}$') { continue }
@@ -2633,6 +2645,7 @@ function Get-DestBlock([string]$t) {
 
 function Get-DestCountry([string]$destBlock) {
     if (-not $destBlock) { return "" }
+    $destBlock = Remove-RegionCode $destBlock
     $found = ""
     foreach ($mm in [regex]::Matches($destBlock, '\b([A-Z]{2})\b')) {
         $cc = $mm.Groups[1].Value
