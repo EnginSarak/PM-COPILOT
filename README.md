@@ -2,7 +2,7 @@
 
 <img src="docs/01-main-menu.png" alt="PROMEDIA COPILOT" width="520"/>
 
-**PROMEDIA COPILOT** · Version 1.2.2
+**PROMEDIA COPILOT** · Version 1.2.3
 
 *An internal PowerShell-based tool that automates renaming, printing, filing and Excel generation for warehouse pick lists and delivery notes*
 
@@ -11,7 +11,7 @@
 ![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)
 ![Excel](https://img.shields.io/badge/Excel-COM%20interop-217346?logo=microsoftexcel&logoColor=white)
-![Version](https://img.shields.io/badge/version-1.2.2-blue)
+![Version](https://img.shields.io/badge/version-1.2.3-blue)
 
 </div>
 
@@ -267,6 +267,17 @@ PROMEDIA COPILOT/
 ---
 
 ## Changelog
+
+### 1.2.3
+
+- Fixed the destination country of a delivery document being read from a
+  region code in brackets: for "Bagnolo in Piano(RE) IT" the folder suggestion
+  used RE (Reunion) instead of IT (Italy). Two-letter codes in brackets are now
+  ignored for both country and location, and the country is determined before
+  a trailing country line is removed from the address.
+- The customer name FAROUK MAAMOUN is written as Tamer whenever it appears in a
+  file name (renamed documents, pick lists, pump lists and pump control files).
+  The documents themselves are not changed.
 
 ### 1.2.2
 

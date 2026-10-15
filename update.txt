@@ -1,5 +1,5 @@
-VERSION=1.2.2
-NOTE=Failed moves/renames (e.g. file still open) now show the real reason and stay on screen until a key is pressed, instead of silently reporting success
+VERSION=1.2.3
+NOTE=Region codes in brackets such as (RE) are no longer mistaken for the country, and the customer name FAROUK MAAMOUN is written as Tamer in file names
 FILE=_promedia_copilot.ps1
 FILE=PROMEDIA COPILOT.bat
 FILE=reset.bat
