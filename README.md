@@ -102,7 +102,7 @@ The first start asks once for printer and folders. A white entry still needs a v
 | **'Noch zu drucken' folder** | Optional second target for pick lists to be printed again later |
 | **Pump control folder** | Where the pump scan control files go |
 | **Halle M scan folder** | Where the scans of signed delivery notes land |
-| **Banner style** | Large banner or a single plain line |
+| **Banner style** | A single plain line (default) or the large banner |
 
 The outbound folder is searched by country, customer and, if present, location and month. Countries may be named in German, English or as a code (`Deutschland`, `Germany`, `DE`), and month folders are recognized in many spellings (`Oktober 2026`, `Okt 26`, `2026-10`).
 
@@ -269,6 +269,11 @@ PROMEDIA COPILOT/
 ## Changelog
 
 ### 1.2.5
+
+- The plain banner is now the default. A banner style chosen in Settings stays as
+  it is.
+
+### 1.2.3
 
 - Fixed the destination country of a delivery document being read from a
   region code in brackets: for "Bagnolo in Piano(RE) IT" the folder suggestion

@@ -20,13 +20,14 @@ $BannerStyles = @(
 )
 
 $script:BannerCache = $null
+$script:DefaultBanner = 1
 
 function Get-BannerArt {
     if ($script:BannerCache) { return $script:BannerCache }
-    $idx = 0
+    $idx = $script:DefaultBanner
     $v = Get-Setting 'BANNER'
     if ($v -match '^\d+$') { $idx = [int]$v }
-    if ($idx -lt 0 -or $idx -ge $BannerStyles.Count) { $idx = 0 }
+    if ($idx -lt 0 -or $idx -ge $BannerStyles.Count) { $idx = $script:DefaultBanner }
     $st = $BannerStyles[$idx]
     $doc = ([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($st.D)) -split "`n")
     $wiz = ([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($st.W)) -split "`n")
@@ -3626,9 +3627,9 @@ function Invoke-Settings([bool]$requireAll) {
         $entries.Add(@{ Text = ("'Noch zu drucken' folder".PadRight(24) + ":  " + $reprintText); Header = $false; Act = 'REPRINT'; Done = $true })
         $entries.Add(@{ Text = ("Pump control folder".PadRight(24) + ":  " + (Format-Setting $s['PUMPCONTROL'] 46)); Header = $false; Act = 'PUMPCONTROL'; Done = [bool]$s['PUMPCONTROL'] })
         $entries.Add(@{ Text = ("Halle M scan folder".PadRight(24) + ":  " + (Format-Setting $s['SCANDIR'] 40) + "   (beta)"); Header = $false; Act = 'SCANDIR'; Done = [bool]$s['SCANDIR'] })
-        $bIdx = 0
+        $bIdx = $script:DefaultBanner
         if ($s['BANNER'] -match '^\d+$') { $bIdx = [int]$s['BANNER'] }
-        if ($bIdx -lt 0 -or $bIdx -ge $BannerStyles.Count) { $bIdx = 0 }
+        if ($bIdx -lt 0 -or $bIdx -ge $BannerStyles.Count) { $bIdx = $script:DefaultBanner }
         $entries.Add(@{ Text = ("Banner style".PadRight(24) + ":  " + $BannerStyles[$bIdx].N); Header = $false; Act = 'BANNER'; Done = $true })
         $entries.Add(@{ Text = ""; Header = $true })
         if ($requireAll) {
