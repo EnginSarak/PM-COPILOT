@@ -938,7 +938,7 @@ function Stop-Spin($spin) {
     try { [Console]::Write("`r" + (' ' * 78) + "`r") } catch { }
 }
 
-$script:AppVersion = '1.2.5'
+$script:AppVersion = '1.5.0'
 
 function Compare-AppVersion([string]$a, [string]$b) {
     $pa = @($a -split '\.' | ForEach-Object { try { [int]$_ } catch { 0 } })
@@ -2085,7 +2085,7 @@ function Invoke-FuScan {
         return
     }
 
-    Write-Host ("  " + $cands.Count + " scanned document(s) to check.   (beta)") -ForegroundColor DarkCyan
+    Write-Host ("  " + $cands.Count + " scanned document(s) to check.") -ForegroundColor DarkCyan
 
     $renamed = 0
     $skipped = 0
@@ -2274,7 +2274,7 @@ function Invoke-FuMove {
         $fuFiles = @(Get-ChildItem -LiteralPath $scan -Filter ($FuPrefix + '_*.pdf') -ErrorAction SilentlyContinue | Sort-Object Name)
 
         $entries = New-Object System.Collections.Generic.List[object]
-        $entries.Add(@{ Text = ($FuPrefix + " documents   (to customer folder)      (beta)"); Header = $true })
+        $entries.Add(@{ Text = ($FuPrefix + " documents   (to customer folder)"); Header = $true })
         if ($fuFiles.Count -eq 0) { $entries.Add(@{ Text = "(none)"; Header = $true }) }
         foreach ($f in $fuFiles) {
             $entries.Add(@{ Text = $f.Name; Header = $false; Act = 'FU'; File = $f })
@@ -2570,6 +2570,621 @@ function Convert-Hex([string]$hex, $map) {
         else { foreach ($r in $ranges) { if ($g -ge $r.A -and $g -le $r.B) { [void]$sb.Append([char]($r.U + ($g - $r.A))); break } } }
     }
     return $sb.ToString()
+}
+
+# Layout-aware PDF text reader for documents not made by Business Central (Axium invoices, Italian
+# certificates): fonts with ToUnicode maps or simple encodings, object streams, form XObjects.
+$pdfTokRx = [regex]::new('\((?>[^()\\]+|\\.|\((?<d>)|\)(?<-d>))*(?(d)(?!))\)|<<|>>|<[0-9A-Fa-f\s]*>|[\[\]{}]|/[^\s/\[\]()<>{}%]*|[+-]?(?:\d+\.?\d*|\.\d+)|[A-Za-z''"*][A-Za-z0-9''"*]*|%[^\r\n]*', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+$pdfObjRx = [regex]::new('(?<![0-9])(\d+)\s+\d+\s+obj\b(.*?)endobj', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+$pdfEscRx = [regex]::new('\\(?:[0-7]{1,3}|\r\n|.)', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+$pdfInv = [System.Globalization.CultureInfo]::InvariantCulture
+$pdfAnsi = [System.Text.Encoding]::GetEncoding(1252)
+
+# Escape sequence -> byte char, looked up instead of decoded one by one
+$PdfEscapes = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
+for ($pdfN = 0; $pdfN -lt 256; $pdfN++) {
+    $pdfO = [Convert]::ToString($pdfN, 8)
+    foreach ($pdfLen in 1..3) { if ($pdfO.Length -le $pdfLen) { $PdfEscapes['\' + $pdfO.PadLeft($pdfLen, '0')] = [string][char]$pdfN } }
+}
+foreach ($pdfPair in @(@('\n', "`n"), @('\r', "`r"), @('\t', "`t"), @('\b', [string][char]8), @('\f', [string][char]12), @("\`r`n", ''), @("\`n", ''), @("\`r", ''))) {
+    $PdfEscapes[$pdfPair[0]] = $pdfPair[1]
+}
+
+# Glyph names of simple-font /Differences arrays (case matters: Adieresis vs adieresis)
+$PdfGlyphNames = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
+foreach ($pdfPair in @(
+    'space= ', 'exclam=!', 'quotedbl="', 'numbersign=#', 'dollar=$', 'percent=%', 'ampersand=&', "quotesingle='", "quoteright='",
+    "quoteleft='", 'parenleft=(', 'parenright=)', 'asterisk=*', 'plus=+', 'comma=,', 'hyphen=-', 'minus=-', 'endash=-', 'emdash=-',
+    'period=.', 'slash=/', 'colon=:', 'semicolon=;', 'less=<', 'equal==', 'greater=>', 'question=?', 'at=@', 'bracketleft=[',
+    'backslash=\', 'bracketright=]', 'asciicircum=^', 'underscore=_', 'grave=`', 'braceleft={', 'bar=|', 'braceright=}',
+    'asciitilde=~', 'zero=0', 'one=1', 'two=2', 'three=3', 'four=4', 'five=5', 'six=6', 'seven=7', 'eight=8', 'nine=9',
+    'quotedblleft="', 'quotedblright="', 'bullet=*', 'nbspace= ')) {
+    $PdfGlyphNames[$pdfPair.Substring(0, $pdfPair.IndexOf('='))] = $pdfPair.Substring($pdfPair.IndexOf('=') + 1)
+}
+foreach ($pdfPair in @(
+    @('degree', 0xB0), @('section', 0xA7), @('Euro', 0x20AC), @('Adieresis', 0xC4), @('Odieresis', 0xD6), @('Udieresis', 0xDC),
+    @('adieresis', 0xE4), @('odieresis', 0xF6), @('udieresis', 0xFC), @('germandbls', 0xDF), @('eacute', 0xE9), @('Eacute', 0xC9),
+    @('egrave', 0xE8), @('agrave', 0xE0), @('ugrave', 0xF9), @('ograve', 0xF2), @('igrave', 0xEC), @('ccedilla', 0xE7))) {
+    $PdfGlyphNames[$pdfPair[0]] = [string][char]$pdfPair[1]
+}
+
+function ConvertFrom-PdfString([string]$tok) {
+    # Literal "(...)" or hex "<...>" string token -> one char per byte
+    if ($tok.StartsWith('<')) {
+        $h = $tok.Substring(1, $tok.Length - 2) -replace '\s', ''
+        if ($h.Length % 2 -eq 1) { $h += '0' }
+        $sb = New-Object System.Text.StringBuilder
+        for ($i = 0; $i -lt $h.Length; $i += 2) { [void]$sb.Append([char][Convert]::ToInt32($h.Substring($i, 2), 16)) }
+        return $sb.ToString()
+    }
+    $s = $tok.Substring(1, $tok.Length - 2)
+    if ($s.IndexOf('\') -lt 0) { return $s }
+    $sb = New-Object System.Text.StringBuilder
+    $pos = 0
+    foreach ($m in $pdfEscRx.Matches($s)) {
+        if ($m.Index -gt $pos) { [void]$sb.Append($s, $pos, $m.Index - $pos) }
+        $v = $m.Value
+        $ch = $PdfEscapes[$v]
+        if ($null -eq $ch) { $ch = $v.Substring(1) }
+        [void]$sb.Append($ch)
+        $pos = $m.Index + $m.Length
+    }
+    if ($pos -lt $s.Length) { [void]$sb.Append($s, $pos, $s.Length - $pos) }
+    return $sb.ToString()
+}
+
+function Get-PdfTokens([string]$s) {
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($m in $pdfTokRx.Matches($s)) { if ($m.Value[0] -ne '%') { $out.Add($m.Value) } }
+    return ,$out
+}
+
+function Read-PdfDictValue([string]$dict, [string]$key) {
+    # Value of a top-level key of a "<< ... >>" dictionary, as raw text ("5 0 R", "<<...>>", "[...]", "/Name", "12")
+    if (-not $dict) { return $null }
+    $ms = $pdfTokRx.Matches($dict)
+    $depth = 0
+    for ($i = 0; $i -lt $ms.Count; $i++) {
+        $v = $ms[$i].Value
+        if ($v -eq '<<' -or $v -eq '[') { $depth++; continue }
+        if ($v -eq '>>' -or $v -eq ']') { $depth--; continue }
+        if ($depth -ne 1 -or $v -cne $key) { continue }
+        if ($i + 1 -ge $ms.Count) { return $null }
+        $n = $ms[$i + 1]
+        if ($n.Value -eq '<<' -or $n.Value -eq '[') {
+            $d = 0
+            for ($j = $i + 1; $j -lt $ms.Count; $j++) {
+                $w = $ms[$j].Value
+                if ($w -eq '<<' -or $w -eq '[') { $d++ }
+                elseif ($w -eq '>>' -or $w -eq ']') {
+                    $d--
+                    if ($d -eq 0) { return $dict.Substring($n.Index, $ms[$j].Index + $ms[$j].Length - $n.Index) }
+                }
+            }
+            return $null
+        }
+        if ($i + 3 -lt $ms.Count -and $ms[$i + 3].Value -ceq 'R' -and $n.Value -match '^\d+$' -and $ms[$i + 2].Value -match '^\d+$') {
+            return ($n.Value + ' ' + $ms[$i + 2].Value + ' R')
+        }
+        return $n.Value
+    }
+    return $null
+}
+
+function Resolve-PdfValue($doc, [string]$v) {
+    # Follows an "n 0 R" reference to the object text; anything else is returned as it is
+    if ($v -and $v -match '^\s*(\d+)\s+\d+\s+R\s*$') {
+        $num = [int]$matches[1]
+        if ($doc.Objs.ContainsKey($num)) { return $doc.Objs[$num] }
+        return $null
+    }
+    return $v
+}
+
+function Get-PdfDictPart([string]$body) {
+    # The dictionary of an object body, without a following stream
+    if (-not $body) { return '' }
+    $t = $body.TrimStart()
+    if (-not $t.StartsWith('<<')) { return $t }
+    $st = $body.IndexOf('stream')
+    if ($st -lt 0) { return $body }
+    return $body.Substring(0, $st)
+}
+
+function Get-PdfStreamBytes($doc, [string]$body) {
+    $st = $body.IndexOf('stream')
+    if ($st -lt 0) { return $null }
+    $dict = $body.Substring(0, $st)
+    $p = $st + 6
+    if ($p -lt $body.Length -and $body[$p] -eq "`r") { $p++ }
+    if ($p -lt $body.Length -and $body[$p] -eq "`n") { $p++ }
+    $len = -1
+    $lv = Resolve-PdfValue $doc (Read-PdfDictValue $dict '/Length')
+    if ($lv -and $lv.Trim() -match '^\d+$') { $len = [int]$lv.Trim() }
+    if ($len -lt 0 -or $p + $len -gt $body.Length) {
+        $en = $body.LastIndexOf('endstream')
+        if ($en -lt $p) { return $null }
+        $len = $en - $p
+    }
+    $raw = $latin.GetBytes($body.Substring($p, $len))
+    $filter = [string](Read-PdfDictValue $dict '/Filter')
+    if (-not $filter) { return $raw }
+    if ($filter -match '^\s*(/FlateDecode|/Fl|\[\s*/FlateDecode\s*\]|\[\s*/Fl\s*\])\s*$') { return (Inflate $raw) }
+    return $null
+}
+
+function Open-PdfDoc([string]$path) {
+    $s = $latin.GetString([System.IO.File]::ReadAllBytes($path))
+    $objs = @{}
+    foreach ($m in $pdfObjRx.Matches($s)) { $objs[[int]$m.Groups[1].Value] = $m.Groups[2].Value }
+    $doc = @{ Raw = $s; Objs = $objs; Fonts = @{} }
+    $packed = @{}
+    foreach ($k in @($objs.Keys)) {
+        $b = $objs[$k]
+        if ($b -notmatch '/Type\s*/ObjStm') { continue }
+        $dict = Get-PdfDictPart $b
+        $data = Get-PdfStreamBytes $doc $b
+        if (-not $data) { continue }
+        $txt = $latin.GetString($data)
+        $first = [int](Resolve-PdfValue $doc (Read-PdfDictValue $dict '/First'))
+        $nums = @([regex]::Matches($txt.Substring(0, [math]::Min($first, $txt.Length)), '\d+') | ForEach-Object { [int]$_.Value })
+        for ($i = 0; $i + 1 -lt $nums.Count; $i += 2) {
+            $start = $first + $nums[$i + 1]
+            $end = $txt.Length
+            if ($i + 3 -lt $nums.Count) { $end = $first + $nums[$i + 3] }
+            if ($start -lt $txt.Length -and $end -gt $start) { $packed[$nums[$i]] = $txt.Substring($start, $end - $start) }
+        }
+    }
+    foreach ($k in $packed.Keys) { if (-not $objs.ContainsKey($k)) { $objs[$k] = $packed[$k] } }
+    return $doc
+}
+
+function Get-PdfPageList($doc) {
+    $pages = New-Object System.Collections.Generic.List[object]
+    $rootM = [regex]::Matches($doc.Raw, '/Root\s+(\d+)\s+\d+\s+R')
+    $treeRef = $null
+    if ($rootM.Count -gt 0) {
+        $cat = Get-PdfDictPart (Resolve-PdfValue $doc ($rootM[$rootM.Count - 1].Groups[1].Value + ' 0 R'))
+        $treeRef = Read-PdfDictValue $cat '/Pages'
+    }
+    $stack = New-Object System.Collections.Generic.List[object]
+    if ($treeRef) { $stack.Add(@{ Ref = $treeRef; Res = $null }) }
+    $seen = @{}
+    while ($stack.Count -gt 0) {
+        $node = $stack[0]; $stack.RemoveAt(0)
+        if ($node.Ref -notmatch '^\s*(\d+)') { continue }
+        $num = [int]$matches[1]
+        if ($seen.ContainsKey($num)) { continue }
+        $seen[$num] = $true
+        $d = Get-PdfDictPart (Resolve-PdfValue $doc $node.Ref)
+        if (-not $d) { continue }
+        $res = Read-PdfDictValue $d '/Resources'
+        if (-not $res) { $res = $node.Res }
+        $kids = Resolve-PdfValue $doc (Read-PdfDictValue $d '/Kids')
+        if ($kids) {
+            $i = 0
+            foreach ($km in [regex]::Matches($kids, '(\d+)\s+\d+\s+R')) {
+                $stack.Insert($i, @{ Ref = ($km.Groups[1].Value + ' 0 R'); Res = $res }); $i++
+            }
+        } else {
+            $pages.Add(@{ Dict = $d; Res = $res })
+        }
+    }
+    if ($pages.Count -eq 0) {
+        foreach ($k in ($doc.Objs.Keys | Sort-Object)) {
+            $d = Get-PdfDictPart $doc.Objs[$k]
+            if ($d -match '/Type\s*/Page(?!s)') { $pages.Add(@{ Dict = $d; Res = (Read-PdfDictValue $d '/Resources') }) }
+        }
+    }
+    return ,$pages
+}
+
+function Read-PdfCMap([string]$cmap) {
+    # ToUnicode CMap -> @{ Map = code->text; Bytes = code length }
+    $map = @{}
+    $bytes = 1
+    $cs = [regex]::Match($cmap, 'begincodespacerange\s*<([0-9A-Fa-f]+)>')
+    if ($cs.Success -and $cs.Groups[1].Value.Length -ge 4) { $bytes = 2 }
+    foreach ($blk in [regex]::Matches($cmap, 'beginbfchar(.*?)endbfchar', [System.Text.RegularExpressions.RegexOptions]::Singleline)) {
+        foreach ($m in [regex]::Matches($blk.Groups[1].Value, '<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]*)>')) {
+            if ($m.Groups[1].Value.Length -ge 4) { $bytes = 2 }
+            $map[[Convert]::ToInt32($m.Groups[1].Value, 16)] = (ConvertFrom-PdfUtf16 $m.Groups[2].Value)
+        }
+    }
+    foreach ($blk in [regex]::Matches($cmap, 'beginbfrange(.*?)endbfrange', [System.Text.RegularExpressions.RegexOptions]::Singleline)) {
+        foreach ($m in [regex]::Matches($blk.Groups[1].Value, '<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(?:<([0-9A-Fa-f]*)>|\[([^\]]*)\])')) {
+            if ($m.Groups[1].Value.Length -ge 4) { $bytes = 2 }
+            $a = [Convert]::ToInt32($m.Groups[1].Value, 16)
+            $b = [Convert]::ToInt32($m.Groups[2].Value, 16)
+            if ($b - $a -gt 65535) { continue }
+            if ($m.Groups[3].Success) {
+                $dst = $m.Groups[3].Value
+                if ($dst.Length -lt 4) { continue }
+                $pre = $dst.Substring(0, $dst.Length - 4)
+                $last = [Convert]::ToInt32($dst.Substring($dst.Length - 4), 16)
+                for ($c = $a; $c -le $b; $c++) {
+                    $map[$c] = (ConvertFrom-PdfUtf16 $pre) + [string][char](($last + $c - $a) -band 0xFFFF)
+                }
+            } else {
+                $c = $a
+                foreach ($h in [regex]::Matches($m.Groups[4].Value, '<([0-9A-Fa-f]*)>')) {
+                    if ($c -gt $b) { break }
+                    $map[$c] = ConvertFrom-PdfUtf16 $h.Groups[1].Value
+                    $c++
+                }
+            }
+        }
+    }
+    return @{ Map = $map; Bytes = $bytes }
+}
+
+function ConvertFrom-PdfUtf16([string]$hex) {
+    $sb = New-Object System.Text.StringBuilder
+    for ($i = 0; $i + 4 -le $hex.Length; $i += 4) { [void]$sb.Append([char][Convert]::ToInt32($hex.Substring($i, 4), 16)) }
+    return $sb.ToString()
+}
+
+function Get-PdfFontInfo($doc, [string]$ref) {
+    if ($doc.Fonts.ContainsKey($ref)) { return $doc.Fonts[$ref] }
+    $fd = Get-PdfDictPart (Resolve-PdfValue $doc $ref)
+    $info = @{ Bytes = 1; Map = $null; Enc = @{}; Widths = @{}; DW = 500.0; Space = $false; Cid = $null }
+    $sub = [string](Read-PdfDictValue $fd '/Subtype')
+    $tu = Read-PdfDictValue $fd '/ToUnicode'
+    if ($tu -and $tu -match '^\s*\d+\s+\d+\s+R') {
+        $body = Resolve-PdfValue $doc $tu
+        if ($body) {
+            $data = Get-PdfStreamBytes $doc $body
+            if ($data) {
+                $cm = Read-PdfCMap ($latin.GetString($data))
+                $info.Map = $cm.Map
+                $info.Bytes = $cm.Bytes
+            }
+        }
+    }
+    if ($sub -eq '/Type0') {
+        $info.Bytes = 2
+        $info.DW = 1000.0
+        $encRef = Read-PdfDictValue $fd '/Encoding'
+        if ($encRef -and $encRef -match '^\s*\d+\s+\d+\s+R') {
+            # Embedded CMap: code length from its codespace, CIDs (for the widths) from its cid ranges
+            $eb = Resolve-PdfValue $doc $encRef
+            $ed = $null
+            if ($eb) { $ed = Get-PdfStreamBytes $doc $eb }
+            if ($ed) {
+                $ct = $latin.GetString($ed)
+                $csm = [regex]::Match($ct, 'begincodespacerange\s*<([0-9A-Fa-f]+)>')
+                if ($csm.Success -and $csm.Groups[1].Value.Length -le 2) { $info.Bytes = 1 }
+                $cidMap = @{}
+                foreach ($blk in [regex]::Matches($ct, 'begincidrange(.*?)endcidrange', [System.Text.RegularExpressions.RegexOptions]::Singleline)) {
+                    foreach ($m in [regex]::Matches($blk.Groups[1].Value, '<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(\d+)')) {
+                        $a = [Convert]::ToInt32($m.Groups[1].Value, 16); $b = [Convert]::ToInt32($m.Groups[2].Value, 16)
+                        if ($b - $a -gt 65535) { continue }
+                        for ($c = $a; $c -le $b; $c++) { $cidMap[$c] = [int]$m.Groups[3].Value + $c - $a }
+                    }
+                }
+                foreach ($blk in [regex]::Matches($ct, 'begincidchar(.*?)endcidchar', [System.Text.RegularExpressions.RegexOptions]::Singleline)) {
+                    foreach ($m in [regex]::Matches($blk.Groups[1].Value, '<([0-9A-Fa-f]+)>\s*(\d+)')) { $cidMap[[Convert]::ToInt32($m.Groups[1].Value, 16)] = [int]$m.Groups[2].Value }
+                }
+                if ($cidMap.Count -gt 0) { $info.Cid = $cidMap }
+            }
+        }
+        $desc = Resolve-PdfValue $doc (Read-PdfDictValue $fd '/DescendantFonts')
+        $dref = [regex]::Match([string]$desc, '(\d+)\s+\d+\s+R')
+        $cid = $null
+        if ($dref.Success) { $cid = Get-PdfDictPart (Resolve-PdfValue $doc ($dref.Groups[1].Value + ' 0 R')) }
+        elseif ($desc -match '<<') { $cid = $desc.Substring($desc.IndexOf('<<')) }
+        if ($cid) {
+            $dw = Read-PdfDictValue $cid '/DW'
+            if ($dw -match '^[\d.]+$') { $info.DW = [double]::Parse($dw, $pdfInv) }
+            $w = Resolve-PdfValue $doc (Read-PdfDictValue $cid '/W')
+            if ($w) {
+                $toks = Get-PdfTokens $w
+                $i = 1
+                while ($i -lt $toks.Count - 1) {
+                    if ($toks[$i] -notmatch '^\d+$') { $i++; continue }
+                    $c1 = [int]$toks[$i]
+                    if ($toks[$i + 1] -eq '[') {
+                        $j = $i + 2
+                        $c = $c1
+                        while ($j -lt $toks.Count -and $toks[$j] -ne ']') {
+                            $info.Widths[$c] = [double]::Parse($toks[$j], $pdfInv); $c++; $j++
+                        }
+                        $i = $j + 1
+                    } elseif ($i + 2 -lt $toks.Count -and $toks[$i + 1] -match '^\d+$') {
+                        $c2 = [int]$toks[$i + 1]
+                        $wv = [double]::Parse($toks[$i + 2], $pdfInv)
+                        if ($c2 - $c1 -le 65535) { for ($c = $c1; $c -le $c2; $c++) { $info.Widths[$c] = $wv } }
+                        $i += 3
+                    } else { $i++ }
+                }
+            }
+        }
+    } else {
+        $info.Bytes = 1
+        $info.Space = $true
+        $fc = Read-PdfDictValue $fd '/FirstChar'
+        $wa = Resolve-PdfValue $doc (Read-PdfDictValue $fd '/Widths')
+        if ($fc -match '^\d+$' -and $wa) {
+            $c = [int]$fc
+            foreach ($t in (Get-PdfTokens $wa)) {
+                if ($t -match '^[+-]?[\d.]+$') { $info.Widths[$c] = [double]::Parse($t, $pdfInv); $c++ }
+            }
+        }
+        $enc = Resolve-PdfValue $doc (Read-PdfDictValue $fd '/Encoding')
+        if ($enc -and $enc.TrimStart().StartsWith('<<')) {
+            $diff = Resolve-PdfValue $doc (Read-PdfDictValue (Get-PdfDictPart $enc) '/Differences')
+            if ($diff) {
+                $code = 0
+                foreach ($t in (Get-PdfTokens $diff)) {
+                    if ($t -match '^\d+$') { $code = [int]$t; continue }
+                    if (-not $t.StartsWith('/')) { continue }
+                    $g = $t.Substring(1)
+                    $ch = $null
+                    if ($PdfGlyphNames.ContainsKey($g)) { $ch = $PdfGlyphNames[$g] }
+                    elseif ($g -cmatch '^[A-Za-z]$') { $ch = $g }
+                    elseif ($g -match '^uni([0-9A-Fa-f]{4})') { $ch = [string][char][Convert]::ToInt32($matches[1], 16) }
+                    if ($null -ne $ch) { $info.Enc[$code] = $ch }
+                    $code++
+                }
+            }
+        }
+    }
+    $doc.Fonts[$ref] = $info
+    return $info
+}
+
+function Get-PdfResourceMap($doc, [string]$res, [string]$key) {
+    # Name -> object reference for /Font or /XObject of a resource dictionary
+    $out = @{}
+    $r = Resolve-PdfValue $doc $res
+    if (-not $r) { return $out }
+    $sub = Resolve-PdfValue $doc (Read-PdfDictValue (Get-PdfDictPart $r) $key)
+    if (-not $sub) { return $out }
+    foreach ($m in [regex]::Matches($sub, '/([^\s/\[\]()<>{}%]+)\s+(\d+)\s+\d+\s+R')) { $out[$m.Groups[1].Value] = ($m.Groups[2].Value + ' 0 R') }
+    return $out
+}
+
+function Mul-PdfMatrix([double[]]$m, [double[]]$n) {
+    return [double[]]@(
+        ($m[0] * $n[0] + $m[1] * $n[2]), ($m[0] * $n[1] + $m[1] * $n[3]),
+        ($m[2] * $n[0] + $m[3] * $n[2]), ($m[2] * $n[1] + $m[3] * $n[3]),
+        ($m[4] * $n[0] + $m[5] * $n[2] + $n[4]), ($m[4] * $n[1] + $m[5] * $n[3] + $n[5]))
+}
+
+$pdfNumP = '(?>[+-]?(?:\d+(?:\.\d*)?|\.\d+))'
+$pdfStrP = '(?:\((?>[^()\\]+|\\.|\((?<d>)|\)(?<-d>))*(?(d)(?!))\)|<[0-9A-Fa-f\s]*>)'
+$pdfNameP = '/(?<f>[^\s/\[\]()<>{}%]+)'
+# Only the operators that place or show text, with their operands. Strings that are not shown are matched
+# (last alternative) so nothing inside them is mistaken for an operator; all other content is skipped.
+$pdfTextOpRx = [regex]::new(
+    '(?<s>' + $pdfStrP + ')\s*(?<op>Tj|'')' +
+    '|(?<n>' + $pdfNumP + '\s+' + $pdfNumP + ')\s+(?<s>' + $pdfStrP + ')\s*(?<op>")' +
+    '|\[(?<a>(?>[^\[\]()]+|\((?>[^()\\]+|\\.|\((?<d>)|\)(?<-d>))*(?(d)(?!))\))*)\]\s*(?<op>TJ)' +
+    '|(?<n>(?:' + $pdfNumP + '\s+){5}' + $pdfNumP + ')\s+(?<op>Tm|cm)(?![A-Za-z0-9*])' +
+    '|(?<n>' + $pdfNumP + '\s+' + $pdfNumP + ')\s+(?<op>Td|TD)(?![A-Za-z0-9*])' +
+    '|' + $pdfNameP + '\s+(?<n>' + $pdfNumP + ')\s+(?<op>Tf)(?![A-Za-z0-9*])' +
+    '|(?<n>' + $pdfNumP + ')\s+(?<op>Tc|Tw|Tz|TL|Ts)(?![A-Za-z0-9*])' +
+    '|' + $pdfNameP + '\s+(?<op>Do)(?![A-Za-z0-9*])' +
+    '|(?<![A-Za-z0-9_/.])(?<op>BT|T\*|q|Q)(?![A-Za-z0-9_*])' +
+    '|' + $pdfStrP,
+    [System.Text.RegularExpressions.RegexOptions]::Singleline)
+$pdfArrRx = [regex]::new($pdfStrP + '|' + $pdfNumP, [System.Text.RegularExpressions.RegexOptions]::Singleline)
+
+function ConvertTo-PdfNumbers([string]$s) {
+    $parts = $s.Split([char[]]" `t`r`n", [System.StringSplitOptions]::RemoveEmptyEntries)
+    $out = New-Object 'double[]' $parts.Length
+    for ($i = 0; $i -lt $parts.Length; $i++) { $out[$i] = [double]::Parse($parts[$i], $pdfInv) }
+    return ,$out
+}
+
+function Read-PdfContent($doc, [string]$content, [string]$res, [double[]]$ctm, $chunks, [int]$page, [int]$depth) {
+    if ($depth -gt 6) { return }
+    $fonts = Get-PdfResourceMap $doc $res '/Font'
+    $xobjs = $null
+    $content = [regex]::Replace($content, '(?s)\bBI\b.*?\bID\b.*?\bEI\b', ' ')
+    $gs = New-Object System.Collections.Generic.List[object]
+    $tm = [double[]]@(1, 0, 0, 1, 0, 0); $tlm = $tm
+    $font = $null; $fs = 0.0; $tc = 0.0; $tw = 0.0; $th = 1.0; $tl = 0.0; $rise = 0.0
+    foreach ($m in $pdfTextOpRx.Matches($content)) {
+        $op = $m.Groups['op'].Value
+        if (-not $op) { continue }
+        $show = $null
+        if ($op -ceq 'TJ') {
+            $show = New-Object System.Collections.Generic.List[object]
+            foreach ($am in $pdfArrRx.Matches($m.Groups['a'].Value)) {
+                $v = $am.Value
+                if ($v[0] -eq '(' -or $v[0] -eq '<') { $show.Add($v) } else { $show.Add([double]::Parse($v, $pdfInv)) }
+            }
+        } elseif ($op -ceq 'Tj') {
+            $show = @($m.Groups['s'].Value)
+        } elseif ($op -ceq 'Tm') {
+            $tlm = ConvertTo-PdfNumbers $m.Groups['n'].Value; $tm = $tlm
+        } elseif ($op -ceq 'Td' -or $op -ceq 'TD') {
+            $v = ConvertTo-PdfNumbers $m.Groups['n'].Value
+            if ($op -ceq 'TD') { $tl = - $v[1] }
+            $tlm = [double[]]@($tlm[0], $tlm[1], $tlm[2], $tlm[3], ($v[0] * $tlm[0] + $v[1] * $tlm[2] + $tlm[4]), ($v[0] * $tlm[1] + $v[1] * $tlm[3] + $tlm[5]))
+            $tm = $tlm
+        } elseif ($op -ceq 'Tf') {
+            $fs = [double]::Parse($m.Groups['n'].Value, $pdfInv)
+            $fn = $m.Groups['f'].Value
+            $font = $null
+            if ($fonts.ContainsKey($fn)) {
+                $fr = $fonts[$fn]
+                $font = $doc.Fonts[$fr]
+                if ($null -eq $font) { $font = Get-PdfFontInfo $doc $fr }
+            }
+        } elseif ($op -ceq 'BT') {
+            $tm = [double[]]@(1, 0, 0, 1, 0, 0); $tlm = $tm
+        } elseif ($op -ceq 'q') {
+            $gs.Add(@($ctm, $font, $fs, $tc, $tw, $th, $tl, $rise))
+        } elseif ($op -ceq 'Q') {
+            if ($gs.Count -gt 0) {
+                $g = $gs[$gs.Count - 1]; $gs.RemoveAt($gs.Count - 1)
+                $ctm = $g[0]; $font = $g[1]; $fs = $g[2]; $tc = $g[3]; $tw = $g[4]; $th = $g[5]; $tl = $g[6]; $rise = $g[7]
+            }
+        } elseif ($op -ceq 'cm') {
+            $ctm = Mul-PdfMatrix (ConvertTo-PdfNumbers $m.Groups['n'].Value) $ctm
+        } elseif ($op -ceq 'T*' -or $op -ceq "'" -or $op -ceq '"') {
+            # move to the next line; ' and " then show a string
+            if ($op -ceq '"') { $v = ConvertTo-PdfNumbers $m.Groups['n'].Value; $tw = $v[0]; $tc = $v[1] }
+            $tlm = [double[]]@($tlm[0], $tlm[1], $tlm[2], $tlm[3], ((-$tl) * $tlm[2] + $tlm[4]), ((-$tl) * $tlm[3] + $tlm[5]))
+            $tm = $tlm
+            if ($op -cne 'T*') { $show = @($m.Groups['s'].Value) }
+        } elseif ($op -ceq 'Do') {
+            # text inside form XObjects
+            if ($null -eq $xobjs) { $xobjs = Get-PdfResourceMap $doc $res '/XObject' }
+            $xn = $m.Groups['f'].Value
+            if ($xobjs.ContainsKey($xn)) {
+                $xb = Resolve-PdfValue $doc $xobjs[$xn]
+                $xd = Get-PdfDictPart $xb
+                if ($xd -match '/Subtype\s*/Form') {
+                    $data = Get-PdfStreamBytes $doc $xb
+                    if ($data) {
+                        $xm = [double[]]@(1, 0, 0, 1, 0, 0)
+                        $mv = Read-PdfDictValue $xd '/Matrix'
+                        if ($mv) {
+                            $nums = ConvertTo-PdfNumbers ($mv -replace '[\[\]]', ' ')
+                            if ($nums.Count -eq 6) { $xm = $nums }
+                        }
+                        $xr = Read-PdfDictValue $xd '/Resources'
+                        if (-not $xr) { $xr = $res }
+                        Read-PdfContent $doc ($latin.GetString($data)) $xr (Mul-PdfMatrix $xm $ctm) $chunks $page ($depth + 1)
+                    }
+                }
+            }
+        } else {
+            $v = [double]::Parse($m.Groups['n'].Value, $pdfInv)
+            if ($op -ceq 'Tc') { $tc = $v } elseif ($op -ceq 'Tw') { $tw = $v } elseif ($op -ceq 'Tz') { $th = $v / 100.0 } elseif ($op -ceq 'TL') { $tl = $v } else { $rise = $v }
+        }
+        if ($null -eq $show -or -not $font) { continue }
+
+        $sb = New-Object System.Text.StringBuilder
+        $start = $null
+        $step = $font.Bytes
+        $umap = $font.Map; $emap = $font.Enc; $wmap = $font.Widths; $cmap = $font.Cid; $dw = $font.DW
+        $wordSp = 0.0
+        if ($font.Space) { $wordSp = $tw * $th }
+        foreach ($el in $show) {
+            if ($el -is [double]) {
+                # a wide kerning gap inside TJ ends the chunk, the line builder then puts a space there
+                if ([math]::Abs($el) -gt 180 -and $sb.Length -gt 0) {
+                    $chunks.Add(@{ P = $page; X = $start[0]; Y = $start[1]; X2 = ($tm[4] * $ctm[0] + $tm[5] * $ctm[2] + $ctm[4]); S = $start[2]; T = $sb.ToString(); Rot = $start[3] })
+                    $sb = New-Object System.Text.StringBuilder
+                    $start = $null
+                }
+                $adj = - $el / 1000.0 * $fs * $th
+                $tm = [double[]]@($tm[0], $tm[1], $tm[2], $tm[3], ($tm[4] + $adj * $tm[0]), ($tm[5] + $adj * $tm[1]))
+                continue
+            }
+            $str = ConvertFrom-PdfString ([string]$el)
+            if ($str.Length -lt $step) { continue }
+            if ($null -eq $start) {
+                # text rendering matrix [fs*Th 0 0 fs 0 rise] x Tm x CTM: origin, font height, rotated or not
+                $m0 = $tm[0] * $ctm[0] + $tm[1] * $ctm[2]; $m1 = $tm[0] * $ctm[1] + $tm[1] * $ctm[3]
+                $m2 = $tm[2] * $ctm[0] + $tm[3] * $ctm[2]; $m3 = $tm[2] * $ctm[1] + $tm[3] * $ctm[3]
+                $m4 = $tm[4] * $ctm[0] + $tm[5] * $ctm[2] + $ctm[4]; $m5 = $tm[4] * $ctm[1] + $tm[5] * $ctm[3] + $ctm[5]
+                $start = @(($rise * $m2 + $m4), ($rise * $m3 + $m5), ([math]::Sqrt($m2 * $m2 + $m3 * $m3) * $fs), ([math]::Abs($m1) -gt [math]::Abs($m0)))
+            }
+            $wsum = 0.0; $cnt = 0; $spaces = 0
+            for ($k = 0; $k + $step -le $str.Length; $k += $step) {
+                $code = [int]$str[$k]
+                if ($step -eq 2) { $code = $code * 256 + [int]$str[$k + 1] }
+                if ($umap -and $umap.ContainsKey($code)) { [void]$sb.Append($umap[$code]) }
+                elseif ($emap.ContainsKey($code)) { [void]$sb.Append($emap[$code]) }
+                elseif ($step -eq 1) { [void]$sb.Append($pdfAnsi.GetString([byte[]]@($code))) }
+                $cid = $code
+                if ($cmap -and $cmap.ContainsKey($code)) { $cid = $cmap[$code] }
+                if ($wmap.ContainsKey($cid)) { $wsum += $wmap[$cid] } else { $wsum += $dw }
+                $cnt++
+                if ($step -eq 1 -and $code -eq 32) { $spaces++ }
+            }
+            $adv = ($wsum / 1000.0 * $fs + $cnt * $tc) * $th + $spaces * $wordSp
+            $tm = [double[]]@($tm[0], $tm[1], $tm[2], $tm[3], ($tm[4] + $adv * $tm[0]), ($tm[5] + $adv * $tm[1]))
+        }
+        if ($sb.Length -gt 0 -and $null -ne $start) {
+            $endX = $tm[4] * $ctm[0] + $tm[5] * $ctm[2] + $ctm[4]
+            $chunks.Add(@{ P = $page; X = $start[0]; Y = $start[1]; X2 = $endX; S = $start[2]; T = $sb.ToString(); Rot = $start[3] })
+        }
+    }
+}
+
+function Get-PdfLines([string]$path) {
+    # Text of a PDF as lines in reading order (top to bottom, left to right)
+    $doc = Open-PdfDoc $path
+    $chunks = New-Object System.Collections.Generic.List[object]
+    $pn = 0
+    foreach ($pg in (Get-PdfPageList $doc)) {
+        $pn++
+        $cv = Read-PdfDictValue $pg.Dict '/Contents'
+        if (-not $cv) { continue }
+        $refs = @([regex]::Matches((Resolve-PdfValue $doc $cv), '(\d+)\s+\d+\s+R') | ForEach-Object { $_.Groups[1].Value + ' 0 R' })
+        if ($cv -match '^\s*\d+\s+\d+\s+R\s*$' -and (Get-PdfDictPart (Resolve-PdfValue $doc $cv)).TrimStart().StartsWith('<<')) { $refs = @($cv) }
+        $sb = New-Object System.Text.StringBuilder
+        foreach ($r in $refs) {
+            $body = Resolve-PdfValue $doc $r
+            if (-not $body) { continue }
+            $data = Get-PdfStreamBytes $doc $body
+            if ($data) { [void]$sb.Append($latin.GetString($data)); [void]$sb.Append("`n") }
+        }
+        Read-PdfContent $doc $sb.ToString() $pg.Res ([double[]]@(1, 0, 0, 1, 0, 0)) $chunks $pn 0
+    }
+
+    # Rows: chunks sorted by page, then top to bottom; a chunk joins the row above when its baseline is close
+    $items = New-Object System.Collections.Generic.List[object]
+    $keys = New-Object System.Collections.Generic.List[double]
+    foreach ($c in $chunks) {
+        if ($c.Rot -or -not $c.T.Trim()) { continue }
+        $items.Add($c)
+        $keys.Add($c.P * 100000.0 - $c.Y)
+    }
+    $ia = $items.ToArray(); $ka = $keys.ToArray()
+    [Array]::Sort([Array]$ka, [Array]$ia)
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $rows = New-Object System.Collections.Generic.List[object]
+    $page = 0
+    foreach ($c in $ia) {
+        if ($c.P -ne $page) {
+            if ($page -gt 0) { Add-PdfRows $rows $lines; $rows.Clear() }
+            $page = $c.P
+        }
+        $row = $null
+        if ($rows.Count -gt 0) {
+            $last = $rows[$rows.Count - 1]
+            $tol = [math]::Max(1.5, 0.4 * [math]::Min($c.S, $last.S))
+            if ([math]::Abs($last.Y - $c.Y) -le $tol) { $row = $last }
+        }
+        if (-not $row) { $row = @{ Y = $c.Y; S = $c.S; Items = (New-Object System.Collections.Generic.List[object]) }; $rows.Add($row) }
+        $row.Items.Add($c)
+    }
+    if ($page -gt 0) { Add-PdfRows $rows $lines }
+    return ,$lines
+}
+
+function Add-PdfRows($rows, $lines) {
+    # One text line per row, left to right; a wide gap becomes three spaces (column break)
+    foreach ($row in $rows) {
+        $ia = $row.Items.ToArray()
+        $ka = [double[]]@($ia | ForEach-Object { $_.X })
+        [Array]::Sort([Array]$ka, [Array]$ia)
+        $sb = New-Object System.Text.StringBuilder
+        $prev = $null
+        foreach ($c in $ia) {
+            if ($prev) {
+                if ($c.T -eq $prev.T -and [math]::Abs($c.X - $prev.X) -lt 1.0) { continue }
+                $gap = $c.X - $prev.X2
+                $sz = [math]::Max(1.0, [math]::Min($c.S, $prev.S))
+                $endsSpace = ($sb.Length -gt 0 -and $sb[$sb.Length - 1] -eq ' ')
+                if ($gap -gt 1.2 * $sz) { [void]$sb.Append('   ') }
+                elseif ($gap -gt 0.12 * $sz -and -not $endsSpace -and -not $c.T.StartsWith(' ')) { [void]$sb.Append(' ') }
+            }
+            [void]$sb.Append($c.T)
+            $prev = $c
+        }
+        $line = ($sb.ToString() -replace '[\x00-\x08\x0B-\x1F]', '').TrimEnd()
+        if ($line.Trim()) { $lines.Add($line) }
+    }
+    $lines.Add([string][char]12)
 }
 
 function Get-DeliveryInfo([string]$path) {
@@ -3588,6 +4203,1245 @@ function Invoke-Move {
     Write-Host ("     Files moved : " + $moved) -ForegroundColor Green
 }
 
+$CooWorkbookName = 'COO calculation.xlsx'
+$CooFormDirName = 'Coo IHK Formulare'
+$CooItalyDirName = 'Coo Italy'
+$CooCertRx = '\bC\d{2}[0-9A-Z]{2}\d{7}\b'
+
+function ConvertFrom-CooNumber([string]$v) {
+    # "1.688,40", "2170,80", "1608", "4888.00" -> double
+    if (-not $v) { return $null }
+    $x = $v -replace '\s', ''
+    if ($x -match ',' -and $x -match '\.') { $x = $x -replace '\.', '' -replace ',', '.' }
+    elseif ($x -match ',') { $x = $x -replace ',', '.' }
+    elseif ($x -match '^\d{1,3}(\.\d{3})+$') { $x = $x -replace '\.', '' }
+    $d = 0.0
+    if ([double]::TryParse($x, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$d)) { return $d }
+    return $null
+}
+
+function ConvertFrom-CooQty([string]$v) {
+    # EA quantities are whole numbers with "." as thousands separator: "25.200" -> 25200
+    $x = ($v -replace '\s', '') -replace ',\d*$', '' -replace '\.', ''
+    if ($x -match '^\d+$') { return [double]$x }
+    return $null
+}
+
+function Split-CooCells([string]$line) {
+    return ,@($line.Trim() -split '\s{3,}' | Where-Object { $_ })
+}
+
+function Get-CooInvoice([string[]]$lines) {
+    $text = $lines -join "`n"
+    $num = First $text 'PSINV\d{2}-\d{5}'
+    if (-not $num -or $text -notmatch '(?i)invoice') { return $null }
+    $inv = @{
+        Number = $num; Date = ''; Customer = ''; OriginText = ''
+        Items = (New-Object System.Collections.Generic.List[object])
+        Packages = $null; Net = $null; Gross = $null
+    }
+    $dm = [regex]::Match($text, '\b(\d{2}/\d{2}/\d{4})\b')
+    if ($dm.Success) { $inv.Date = $dm.Groups[1].Value }
+    $om = [regex]::Match($text, '(?i)The goods are of\s+(.+?)\s+origin')
+    if ($om.Success) { $inv.OriginText = $om.Groups[1].Value.Trim() }
+    for ($i = 0; $i -lt $lines.Count - 1 -and -not $inv.Customer; $i++) {
+        if ($lines[$i] -notmatch 'Delivery Address\s*$') { continue }
+        for ($j = $i + 1; $j -lt [math]::Min($lines.Count, $i + 4); $j++) {
+            $cells = Split-CooCells $lines[$j]
+            if ($cells.Count -eq 0) { continue }
+            $last = $cells[$cells.Count - 1]
+            if ($last -notmatch '^(SWIFT|IBAN|Customer|AXIUM|\d)') { $inv.Customer = $last; break }
+        }
+    }
+
+    $itemRx = '^\s*(?<item>\d{5,10})\s+(?:\d{5,10}\s+)?(?<desc>.*?)\s+(?<uom>[A-Z]{2,4})\s+(?<qty>\d{1,3}(?:\.\d{3})+|\d+)\s+(?<hs>\d{6,10})\s+(?<org>[A-Z]{2})(?:\s|$)'
+    $cur = $null
+    foreach ($ln in $lines) {
+        if ($ln -eq [string][char]12) { continue }
+        $m = [regex]::Match($ln, $itemRx)
+        if ($m.Success) {
+            $cur = @{
+                Item = $m.Groups['item'].Value; Desc = $m.Groups['desc'].Value.Trim(); Uom = $m.Groups['uom'].Value
+                Qty = (ConvertFrom-CooQty $m.Groups['qty'].Value); Hs = $m.Groups['hs'].Value; Origin = $m.Groups['org'].Value
+                Lots = (New-Object System.Collections.Generic.List[object]); Text = (New-Object System.Text.StringBuilder)
+            }
+            $inv.Items.Add($cur)
+            continue
+        }
+        if (-not $cur) { continue }
+        if ($ln -match '^\s*Carrier\b|Total packages') { $cur = $null; continue }
+        [void]$cur.Text.Append(' ')
+        [void]$cur.Text.Append($ln)
+    }
+    foreach ($it in $inv.Items) {
+        $t = $it.Text.ToString()
+        foreach ($lm in [regex]::Matches($t, 'Lot No\.?\s*:?\s*(?<lot>[A-Z]?\d{6,8})\s*(?:(?:EA|PCS|PZ)\s*-?|-)\s*(?<qty>\d{1,3}(?:\.\d{3})+|\d+)')) {
+            $it.Lots.Add(@{ Lot = $lm.Groups['lot'].Value; Qty = (ConvertFrom-CooQty $lm.Groups['qty'].Value) })
+        }
+        $first = (Split-CooCells $t)
+        if (-not $it.Desc -and $first.Count -gt 0) { $it.Desc = $first[0] }
+        $it.Remove('Text')
+    }
+
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -notmatch 'Total packages') { continue }
+        for ($j = $i + 1; $j -lt [math]::Min($lines.Count, $i + 5); $j++) {
+            $nums = @([regex]::Matches($lines[$j], '(?<![\d.,])\d{1,3}(?:[.,]\d{3})*[.,]\d{1,2}(?![\d.,])') | ForEach-Object { ConvertFrom-CooNumber $_.Value })
+            if ($nums.Count -ge 3) {
+                $inv.Packages = $nums[0]; $inv.Net = $nums[1]; $inv.Gross = $nums[2]
+                break
+            }
+        }
+        if ($null -ne $inv.Packages) { break }
+    }
+    return $inv
+}
+
+function Get-CooItalianCert([string[]]$lines) {
+    # Italian chamber "Certificato di origine": page 1 is the ORIGINALE, page 2 the same data as COPIA
+    $page = New-Object System.Collections.Generic.List[string]
+    foreach ($ln in $lines) {
+        if ($ln -eq [string][char]12) { if ($page.Count -gt 0) { break } else { continue } }
+        $page.Add((($ln -replace '(?:<\s*){2,}<?', ' ') -replace '\s+$', ''))
+    }
+    $text = $page -join "`n"
+    if ($text -notmatch '(?i)certifica') { return $null }
+    $num = First $text $CooCertRx
+    if (-not $num) { return $null }
+    $c = @{ Number = $num; Origin = ''; Doc = ''; DocDate = ''; Pallets = $null; Net = $null; Gross = $null; Swapped = $false; Product = ''; Issued = ''; Lots = (New-Object System.Collections.Generic.List[object]) }
+
+    for ($i = 0; $i -lt $page.Count; $i++) {
+        if ($page[$i] -notmatch '(?i)Country of origin') { continue }
+        for ($j = $i + 1; $j -lt [math]::Min($page.Count, $i + 9) -and -not $c.Origin; $j++) {
+            foreach ($cell in (Split-CooCells $page[$j])) {
+                if ($cell -cmatch '^(EGYPT|EGITTO|ITALY|ITALIA|[A-Z]{4,}(?: [A-Z]{2,})*)(?:\s*\(.*\))?$' -and $cell -notmatch '^(GERMANY|ORIGINALE|COPIA|PROMEDIA)\b') {
+                    $c.Origin = $matches[1]
+                    break
+                }
+            }
+        }
+        break
+    }
+    if (-not $c.Origin -and $text -match '\bEGYPT\b') { $c.Origin = 'EGYPT' }
+
+    $dm = [regex]::Match($text, '(PSINV\d{2}-V-\d{5})(?:\s*ON)?(?:\s*(\d{2}/\d{2}/\d{4}))?')
+    if ($dm.Success) { $c.Doc = $dm.Groups[1].Value; $c.DocDate = $dm.Groups[2].Value }
+    $dd = [regex]::Match($text, 'Document Date:?\s*(\d{2}/\d{2}/\d{4})')
+    if ($dd.Success) { $c.DocDate = $dd.Groups[1].Value }
+    $pm = [regex]::Match($text, '(?i)NUMBER OF PALLETS:?\s*(\d+)')
+    if (-not $pm.Success) { $pm = [regex]::Match($text, '(?i)\b([\dO]+)\s*PALLETS\b') }
+    if ($pm.Success) { $c.Pallets = [double](($pm.Groups[1].Value -replace 'O', '0')) }
+    $nm = [regex]::Match($text, '(?i)Net weight\s*(?:KG)?\s*:?\s*(\d[\d.,]*)')
+    $gm = [regex]::Match($text, '(?i)Gross weight\s*(?:KG)?\s*:?\s*(\d[\d.,]*)')
+    if ($nm.Success) { $c.Net = ConvertFrom-CooNumber ($nm.Groups[1].Value.TrimEnd('.', ',')) }
+    if ($gm.Success) { $c.Gross = ConvertFrom-CooNumber ($gm.Groups[1].Value.TrimEnd('.', ',')) }
+    if ($null -ne $c.Net -and $null -ne $c.Gross -and $c.Net -gt $c.Gross) {
+        $t = $c.Net; $c.Net = $c.Gross; $c.Gross = $t; $c.Swapped = $true
+    }
+    $prm = [regex]::Match($text, '(?m)^\s*(F\d{5}-\d{2}\s+.+?)(?:\s{3,}|$)')
+    if ($prm.Success) { $c.Product = $prm.Groups[1].Value.Trim() }
+    $im = [regex]::Match($text, '(?m)\b([A-Z][a-z]+),\s*(\d{2}/\d{2}/\d{4})')
+    if ($im.Success) { $c.Issued = $im.Groups[2].Value }
+
+    $last = $null
+    foreach ($m in [regex]::Matches($text, 'Lot No\.?\s*:?[ \t]*(?<lot>P\d{7}|\d{8})?(?:\s*-\s*PZ\s*-\s*(?<q2>\d[\d.]*))?|Q\.\s?ty\s*:?[ \t]*(?<qty>\d{1,3}(?:\.\d{3})+|\d+)?')) {
+        if ($m.Value -match '^Lot') {
+            if (-not $m.Groups['lot'].Success) { continue }
+            $lot = $m.Groups['lot'].Value
+            if (@($c.Lots | Where-Object { $_.Lot -eq $lot }).Count -gt 0) { $last = $null; continue }
+            $last = @{ Lot = $lot; Qty = $null }
+            if ($m.Groups['q2'].Success) { $last.Qty = ConvertFrom-CooQty $m.Groups['q2'].Value }
+            $c.Lots.Add($last)
+        } elseif ($m.Groups['qty'].Success -and $last -and $null -eq $last.Qty) {
+            $last.Qty = ConvertFrom-CooQty $m.Groups['qty'].Value
+        }
+    }
+    return $c
+}
+
+function Get-CooShares([double]$total, [double[]]$weights, [int]$decimals) {
+    # Splits total in proportion to weights, rounded; the rounding rest goes to the largest share so the sum stays exact
+    $sum = 0.0
+    foreach ($w in $weights) { $sum += $w }
+    $out = New-Object 'double[]' $weights.Count
+    if ($sum -le 0) { return ,$out }
+    $acc = 0.0; $big = 0
+    for ($i = 0; $i -lt $weights.Count; $i++) {
+        $out[$i] = [math]::Round($total * $weights[$i] / $sum, $decimals)
+        $acc += $out[$i]
+        if ($weights[$i] -gt $weights[$big]) { $big = $i }
+    }
+    $out[$big] = [math]::Round($out[$big] + ($total - $acc), $decimals)
+    return ,$out
+}
+
+function Get-CooItalyRows($cert) {
+    # Rows for sheet "COO Italy": pallets per lot by rule of three, weights by quantity share
+    $rows = New-Object System.Collections.Generic.List[object]
+    $lots = $cert.Lots
+    if ($lots.Count -eq 0 -or $null -eq $cert.Net -or $null -eq $cert.Gross -or -not $cert.Pallets) { return $null }
+    $qty = New-Object 'double[]' $lots.Count
+    for ($i = 0; $i -lt $lots.Count; $i++) {
+        if (-not $lots[$i].Qty) {
+            if ($lots.Count -gt 1) { return $null }
+            $qty[$i] = 1.0
+        } else { $qty[$i] = $lots[$i].Qty }
+    }
+    $pal = Get-CooShares $cert.Pallets $qty 3
+    $net = Get-CooShares $cert.Net $qty 2
+    $gross = Get-CooShares $cert.Gross $qty 2
+    for ($i = 0; $i -lt $lots.Count; $i++) {
+        $rows.Add(@{ Cert = $cert.Number; Doc = $cert.Doc; Lot = $lots[$i].Lot; Pal = $pal[$i]; Net = $net[$i]; Gross = $gross[$i] })
+    }
+    return ,$rows
+}
+
+function Get-CooEgyptLots($inv) {
+    $lots = New-Object System.Collections.Generic.List[object]
+    foreach ($it in $inv.Items) {
+        if ($it.Origin -ne 'EG') { continue }
+        foreach ($l in $it.Lots) { $lots.Add($l) }
+    }
+    return ,$lots
+}
+
+function Get-CooEgyptTotals($inv, $certs) {
+    # Pallets and weights of the Egyptian goods. A mixed invoice only has totals for all goods, then the
+    # Italian certificates give a suggestion (EA per pallet and kg per EA of each lot); $null if they cannot
+    if (@($inv.Items | Where-Object { $_.Origin -ne 'EG' }).Count -eq 0) {
+        if ($inv.Packages -and $null -ne $inv.Net -and $null -ne $inv.Gross) {
+            return @{ Packages = $inv.Packages; Net = $inv.Net; Gross = $inv.Gross; FromInvoice = $true }
+        }
+        return $null
+    }
+    $tot = @{ Packages = 0.0; Net = 0.0; Gross = 0.0; FromInvoice = $false }
+    foreach ($l in (Get-CooEgyptLots $inv)) {
+        $src = $null
+        foreach ($c in $certs) {
+            $tq = 0.0
+            foreach ($x in $c.Lots) { if ($x.Qty) { $tq += $x.Qty } }
+            if ($tq -le 0 -or -not $c.Pallets -or $null -eq $c.Net) { continue }
+            foreach ($x in $c.Lots) { if ($x.Lot -eq $l.Lot) { $src = @{ C = $c; Q = $tq } } }
+            if ($src) { break }
+        }
+        if (-not $src) { return $null }
+        $tot.Packages += $l.Qty * $src.C.Pallets / $src.Q
+        $tot.Net += $l.Qty * $src.C.Net / $src.Q
+        $tot.Gross += $l.Qty * $src.C.Gross / $src.Q
+    }
+    $tot.Packages = [math]::Round($tot.Packages, 2)
+    $tot.Net = [math]::Round($tot.Net, 2)
+    $tot.Gross = [math]::Round($tot.Gross, 2)
+    return $tot
+}
+
+function Get-CooGermanRows($inv, $totals) {
+    # Rows for sheet "COO DE": the Egyptian lots of the invoice, pallets by rule of three, weights by EA share
+    $res = @{ Rows = (New-Object System.Collections.Generic.List[object]); Notes = (New-Object System.Collections.Generic.List[string]); EaPerPal = $null }
+    foreach ($it in $inv.Items) {
+        if ($it.Origin -ne 'EG') { continue }
+        $sum = 0.0
+        foreach ($l in $it.Lots) { $sum += $l.Qty }
+        if ($it.Lots.Count -eq 0) { $res.Notes.Add("Item " + $it.Item + ": no lot numbers found on the invoice") }
+        elseif ($sum -ne $it.Qty) { $res.Notes.Add("Item " + $it.Item + ": the lots add up to " + $sum + " EA, the invoice line says " + $it.Qty + " EA") }
+    }
+    $lots = Get-CooEgyptLots $inv
+    if ($lots.Count -eq 0 -or -not $totals -or -not $totals.Packages) { return $res }
+    $ea = New-Object 'double[]' $lots.Count
+    $totalEa = 0.0
+    for ($i = 0; $i -lt $lots.Count; $i++) { $ea[$i] = $lots[$i].Qty; $totalEa += $lots[$i].Qty }
+    $res.EaPerPal = $totalEa / $totals.Packages
+    $pal = Get-CooShares $totals.Packages $ea 3
+    $net = Get-CooShares ([math]::Min($totals.Net, $totals.Gross)) $ea 2
+    $gross = Get-CooShares ([math]::Max($totals.Net, $totals.Gross)) $ea 2
+    if ($totals.Net -gt $totals.Gross) { $res.Notes.Add("Net and gross weight were swapped, corrected") }
+    for ($i = 0; $i -lt $lots.Count; $i++) {
+        $res.Rows.Add(@{ Doc = $inv.Number; Lot = $lots[$i].Lot; Ea = $ea[$i]; Pal = $pal[$i]; Net = $net[$i]; Gross = $gross[$i] })
+    }
+    return $res
+}
+
+function Test-CooDateNumber([string]$n) {
+    # 8 digits that read as a date (20261016, 16102026) are not draft or certificate numbers
+    return ($n -match '^20\d\d(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])$' -or $n -match '^(0[1-9]|[12]\d|3[01])(0[1-9]|1[0-2])20\d\d$')
+}
+
+function Get-CooNumbers([string]$text) {
+    # 8-digit draft / certificate numbers in order of appearance; lot numbers start with 0, dates are left out
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($m in [regex]::Matches($text, '(?<!\d)[1-9]\d{7}(?!\d)')) {
+        if (-not (Test-CooDateNumber $m.Value) -and -not $out.Contains($m.Value)) { $out.Add($m.Value) }
+    }
+    return ,$out
+}
+
+function Get-CooNumberFromName([string]$name) {
+    $found = Get-CooNumbers $name
+    if ($found.Count -eq 1) { return $found[0] }
+    return ''
+}
+
+function Get-CooZips([string]$cooDir) {
+    # Every ZIP with PDFs in the Downloads folder is a candidate, whatever the attachments are called:
+    # the content decides when it is read. Only update ZIPs of PROMEDIA COPILOT itself are left out.
+    try { Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop } catch { }
+    $forms = @(Get-ChildItem -LiteralPath (Join-Path $cooDir $CooFormDirName) -Filter '*.pdf' -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+    $res = New-Object System.Collections.Generic.List[object]
+    foreach ($z in @(Get-ChildItem -LiteralPath $WorkDir -Filter '*.zip' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)) {
+        $zip = $null
+        try {
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($z.FullName)
+            $names = @($zip.Entries | ForEach-Object { $_.Name })
+            if ($names -contains 'update.txt' -and $names -contains '_promedia_copilot.ps1') { continue }
+            $pdfs = @($names | Where-Object { $_ -match '(?i)\.pdf$' })
+            if ($pdfs.Count -eq 0) { continue }
+            $nr = Get-CooNumberFromName $z.BaseName
+            $done = $false
+            if ($nr) { $done = (@($forms | Where-Object { $_ -match ('(?<!\d)' + $nr + '(?!\d)') -and $_ -notmatch '(?i)cancel' }).Count -gt 0) }
+            $res.Add(@{ File = $z; Nr = $nr; Pdfs = $pdfs.Count; Done = $done })
+        } catch { } finally { if ($zip) { $zip.Dispose() } }
+    }
+    return ,$res
+}
+
+function Read-CooZip([string]$zipPath) {
+    # Unpacks the PDFs of the draft e-mail to a temp folder and sorts them: Axium invoice, Italian certificates, other
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('pmcopilot_coo_' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -ErrorAction Stop | Out-Null
+    $case = @{ Zip = $zipPath; Temp = $tmp; DraftNr = ''; Invoices = (New-Object System.Collections.Generic.List[object]); Certs = (New-Object System.Collections.Generic.List[object]); Finals = (New-Object System.Collections.Generic.List[string]); Other = (New-Object System.Collections.Generic.List[string]) }
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+    $files = New-Object System.Collections.Generic.List[object]
+    try {
+        $n = 0
+        foreach ($e in @($zip.Entries | Where-Object { $_.Name -match '(?i)\.pdf$' })) {
+            $n++
+            $dest = Join-Path $tmp ($n.ToString('00') + '_' + ($e.Name -replace '[\\/:*?"<>|]', '_'))
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e, $dest, $true)
+            $files.Add(@{ Name = $e.Name; Path = $dest })
+        }
+    } finally { $zip.Dispose() }
+
+    $seen = @{}
+    $i = 0
+    foreach ($f in $files) {
+        $i++
+        # the same certificate is often attached twice under different names
+        $hash = (Get-FileHash -LiteralPath $f.Path -Algorithm MD5).Hash
+        if ($seen.ContainsKey($hash)) { continue }
+        $seen[$hash] = $true
+        $spin = Start-Spin ("reading " + $i + "/" + $files.Count + ": " + $f.Name + "...")
+        $lines = $null
+        try { $lines = Get-PdfLines $f.Path } catch { $lines = $null }
+        Stop-Spin $spin
+        if (-not $lines) { $case.Other.Add($f.Name); continue }
+        $c = $null
+        $inv = $null
+        try {
+            $c = Get-CooItalianCert $lines
+            if (-not $c) {
+                $all = $lines -join "`n"
+                if ($all -match '(?i)cert\.ihk\.de|DIGITALLY SIGNED') { $case.Finals.Add($f.Name); continue }
+                if ($all -match '(?i)ENTWURF|DRAFT' -and $all -match '(?i)URSPRUNGSZEUGNIS|CERTIFICATE OF ORIGIN') {
+                    # IHK draft attached: its number is the draft number when the ZIP name has none
+                    $head = Get-CooNumbers ((@($lines | Select-Object -First 6)) -join "`n")
+                    if ($head.Count -eq 0) { $head = Get-CooNumbers $all }
+                    if ($head.Count -gt 0 -and -not $case.DraftNr) { $case.DraftNr = $head[0] }
+                    $case.Other.Add($f.Name)
+                    continue
+                }
+                $inv = Get-CooInvoice $lines
+            }
+        } catch { $case.Other.Add($f.Name); continue }
+        if ($c) {
+            if (@($case.Certs | Where-Object { $_.Number -eq $c.Number }).Count -eq 0) {
+                $c.File = $f.Path; $c.Name = $f.Name
+                $case.Certs.Add($c)
+            }
+            continue
+        }
+        if ($inv) {
+            if (@($case.Invoices | Where-Object { $_.Number -eq $inv.Number }).Count -eq 0) { $inv.Name = $f.Name; $case.Invoices.Add($inv) }
+            continue
+        }
+        $case.Other.Add($f.Name)
+    }
+    return $case
+}
+
+function Read-CooRows($ws, [int]$cols) {
+    # Data rows of a sheet table (row 1 = header), up to the last filled cell in columns A to C.
+    # End(xlUp) stops at the end of the table (row ~1048572 here), so the used range is searched instead.
+    $ur = $ws.UsedRange
+    $bottom = $ur.Row + $ur.Rows.Count - 1
+    $last = 1
+    if ($bottom -ge 2) {
+        $abc = $ws.Range($ws.Cells(2, 1), $ws.Cells($bottom, 3)).Value2
+        for ($i = $bottom - 1; $i -ge 1 -and $last -eq 1; $i--) {
+            for ($j = 1; $j -le 3; $j++) {
+                $x = $abc[$i, $j]
+                if ($null -ne $x -and ([string]$x).Trim() -ne '') { $last = $i + 1; break }
+            }
+        }
+    }
+    $rows = New-Object System.Collections.Generic.List[object]
+    if ($last -lt 2) { return @{ Rows = $rows; Last = $last } }
+    $v = $ws.Range($ws.Cells(2, 1), $ws.Cells($last, $cols)).Value2
+    for ($i = 1; $i -le $last - 1; $i++) {
+        $row = @{ Row = $i + 1; V = @() }
+        $vals = New-Object 'object[]' $cols
+        for ($j = 1; $j -le $cols; $j++) { $vals[$j - 1] = $v[$i, $j] }
+        $row.V = $vals
+        $rows.Add($row)
+    }
+    return @{ Rows = $rows; Last = $last }
+}
+
+function ConvertTo-CooKey($v) {
+    if ($null -eq $v) { return '' }
+    if ($v -is [double]) { return ([int64]$v).ToString('00000000') }
+    return ([string]$v).Trim().ToUpper()
+}
+
+function ConvertTo-CooDouble($v) {
+    if ($null -eq $v) { return 0.0 }
+    if ($v -is [double]) { return $v }
+    $d = ConvertFrom-CooNumber ([string]$v)
+    if ($null -eq $d) { return 0.0 }
+    return $d
+}
+
+function Open-CooWorkbook([string]$path) {
+    $xl = $null
+    try { $xl = New-Object -ComObject Excel.Application } catch { throw "Microsoft Excel could not be started (COM). Is Excel installed?" }
+    $xl.Visible = $false
+    $xl.DisplayAlerts = $false
+    $xl.ScreenUpdating = $false
+    try { $xl.AskToUpdateLinks = $false } catch { }
+    try {
+        # Notify = false: a workbook in use opens read-only instead of waiting on a hidden dialog
+        $miss = [Type]::Missing
+        $wb = $xl.Workbooks.Open($path, 0, $false, $miss, $miss, $miss, $true, $miss, $miss, $miss, $false)
+    } catch {
+        try { $xl.Quit() } catch { }
+        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($xl)
+        throw ("Could not open " + [System.IO.Path]::GetFileName($path) + ": " + $_.Exception.Message)
+    }
+    return @{ Xl = $xl; Wb = $wb }
+}
+
+function Close-CooWorkbook($h, [bool]$save) {
+    if (-not $h) { return }
+    try { if ($save) { $h.Wb.Save() } } finally {
+        try { $h.Wb.Close($false) } catch { }
+        try { $h.Xl.Quit() } catch { }
+        foreach ($o in @($h.Wb, $h.Xl)) {
+            try { if ($o) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($o) } } catch { }
+        }
+        [GC]::Collect()
+        [GC]::WaitForPendingFinalizers()
+    }
+}
+
+function Get-CooPlan($case, [string]$nr, $wb, $totals) {
+    # Everything that would be written, worked out from the documents and the current workbook
+    $wsIt = $wb.Worksheets.Item('COO Italy')
+    $wsDe = $wb.Worksheets.Item('COO DE')
+    $it = Read-CooRows $wsIt 6
+    $de = Read-CooRows $wsDe 9
+    $inv = $case.Invoices[0]
+    $plan = @{
+        Nr = $nr; Invoice = $inv
+        ItLast = $it.Last; DeLast = $de.Last
+        ItNew = (New-Object System.Collections.Generic.List[object])
+        CertInfo = (New-Object System.Collections.Generic.List[object])
+        DeNew = (New-Object System.Collections.Generic.List[object])
+        DeExisting = (New-Object System.Collections.Generic.List[object])
+        Notes = (New-Object System.Collections.Generic.List[string])
+        Warnings = (New-Object System.Collections.Generic.List[string])
+        Coverage = @{}
+    }
+
+    $itAll = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $it.Rows) {
+        $itAll.Add(@{ Cert = (ConvertTo-CooKey $r.V[0]); Lot = (ConvertTo-CooKey $r.V[2]); Gross = (ConvertTo-CooDouble $r.V[5]) })
+    }
+    foreach ($c in $case.Certs) {
+        $info = @{ Cert = $c; Status = ''; Rows = $null }
+        if ($c.Origin -and $c.Origin -notmatch '^(EGYPT|EGITTO)$') {
+            $info.Status = 'origin ' + $c.Origin + ', not used'
+        } else {
+            $rows = Get-CooItalyRows $c
+            if (-not $rows) {
+                $info.Status = 'could not be read completely (lots, quantities, pallets or weights missing), enter it by hand'
+                $plan.Warnings.Add("Italian certificate " + $c.Number + " could not be read completely")
+            } else {
+                $new = @($rows | Where-Object { $r = $_; @($itAll | Where-Object { $_.Cert -eq $r.Cert -and $_.Lot -eq $r.Lot }).Count -eq 0 })
+                if ($new.Count -eq 0) { $info.Status = "already in 'COO Italy'" }
+                elseif ($new.Count -lt $rows.Count) { $info.Status = 'partly in ''COO Italy'', missing lots are added' }
+                else { $info.Status = 'new' }
+                $info.Rows = $new
+                foreach ($r in $new) {
+                    $plan.ItNew.Add($r)
+                    $itAll.Add(@{ Cert = $r.Cert; Lot = $r.Lot; Gross = $r.Gross })
+                }
+            }
+        }
+        $plan.CertInfo.Add($info)
+    }
+
+    $deAll = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $de.Rows) {
+        $row = @{ Row = $r.Row; Nr = (ConvertTo-CooKey $r.V[0]); Doc = [string]$r.V[1]; Lot = (ConvertTo-CooKey $r.V[2]); Pal = (ConvertTo-CooDouble $r.V[3]); Net = (ConvertTo-CooDouble $r.V[4]); Gross = (ConvertTo-CooDouble $r.V[5]) }
+        $deAll.Add($row)
+        if ($row.Nr -eq $nr) { $plan.DeExisting.Add($row) }
+    }
+
+    $g = Get-CooGermanRows $inv $totals
+    foreach ($n in $g.Notes) { $plan.Notes.Add($n) }
+    $plan.EaPerPal = $g.EaPerPal
+    if ($plan.DeExisting.Count -eq 0) {
+        foreach ($r in $g.Rows) { $plan.DeNew.Add($r); $deAll.Add(@{ Nr = $nr; Lot = (ConvertTo-CooKey $r.Lot); Gross = $r.Gross }) }
+    } else {
+        # Already entered: only compare with the invoice
+        $diff = $false
+        if ($plan.DeExisting.Count -ne $g.Rows.Count) { $diff = $true }
+        foreach ($r in $g.Rows) {
+            $m = @($plan.DeExisting | Where-Object { $_.Lot -eq (ConvertTo-CooKey $r.Lot) })
+            if ($m.Count -ne 1 -or [math]::Abs($m[0].Pal - $r.Pal) -gt 0.01 -or [math]::Abs($m[0].Gross - $r.Gross) -gt 0.01 -or [math]::Abs($m[0].Net - $r.Net) -gt 0.01) { $diff = $true }
+        }
+        $plan.ExistingDiffers = $diff
+        $plan.Computed = $g.Rows
+    }
+
+    $lots = @($plan.DeNew | ForEach-Object { ConvertTo-CooKey $_.Lot })
+    if ($plan.DeExisting.Count -gt 0) { $lots = @($plan.DeExisting | ForEach-Object { $_.Lot }) }
+    foreach ($lot in ($lots | Select-Object -Unique)) {
+        $its = @($itAll | Where-Object { $_.Lot -eq $lot })
+        $total = 0.0; foreach ($x in $its) { $total += $x.Gross }
+        $used = 0.0; foreach ($x in @($deAll | Where-Object { $_.Lot -eq $lot })) { $used += $x.Gross }
+        $plan.Coverage[$lot] = @{ Certs = @($its | ForEach-Object { $_.Cert } | Select-Object -Unique); Total = $total; Left = ($total - $used) }
+        if ($its.Count -eq 0) { $plan.Warnings.Add("Lot " + $lot + ": no Italian certificate in 'COO Italy' or in the ZIP") }
+        elseif ($total - $used -lt -0.005) { $plan.Warnings.Add("Lot " + $lot + ": " + (Format-CooKg (-($total - $used))) + " kg more than the Italian certificates cover") }
+    }
+    return $plan
+}
+
+function Format-CooKg([double]$v) { return $v.ToString('#,##0.00', $UnitsDe) }
+function Format-CooPal([double]$v) { return $v.ToString('0.###', $UnitsDe) }
+
+function Write-CooRows($ws, [int]$firstRow, $rows, [string[]]$textCols) {
+    # Writes the value rows (object[,]) below the last row; text columns are formatted as text first so "02607053" keeps its 0
+    $n = $rows.GetLength(0)
+    $cols = $rows.GetLength(1)
+    $lastRow = $firstRow + $n - 1
+    foreach ($col in $textCols) { $ws.Range(($col + $firstRow) + ':' + ($col + $lastRow)).NumberFormat = '@' }
+    Set-SheetArray $ws $firstRow 1 $rows
+    try {
+        if ($ws.ListObjects.Count -gt 0) {
+            $lo = $ws.ListObjects.Item(1)
+            $loLast = $lo.Range.Row + $lo.Range.Rows.Count - 1
+            if ($lastRow -gt $loLast) { $lo.Resize($ws.Range($lo.Range.Cells(1, 1), $ws.Cells($lastRow, $lo.Range.Column + $lo.Range.Columns.Count - 1))) | Out-Null }
+        }
+    } catch { }
+}
+
+
+function Invoke-CooWrite($h, $plan, [bool]$setForm) {
+    # Writes the new rows (and the number into the IHK form), calculates once and reads back what Excel says.
+    # The FILTER/SUMIF formulas run over whole table columns, so calculating after every write would take long.
+    $res = @{ ItRows = 0; DeRows = 0; DeCheck = (New-Object System.Collections.Generic.List[object]) }
+    $calc = $h.Xl.Calculation
+    $h.Xl.Calculation = -4135
+    try {
+        $wb = $h.Wb
+        if ($plan.ItNew.Count -gt 0) {
+            $ws = $wb.Worksheets.Item('COO Italy')
+            $arr = New-Object 'object[,]' $plan.ItNew.Count, 6
+            for ($i = 0; $i -lt $plan.ItNew.Count; $i++) {
+                $r = $plan.ItNew[$i]
+                $arr[$i, 0] = $r.Cert; $arr[$i, 1] = $r.Doc; $arr[$i, 2] = $r.Lot
+                $arr[$i, 3] = [double]$r.Pal; $arr[$i, 4] = [double]$r.Net; $arr[$i, 5] = [double]$r.Gross
+            }
+            Write-CooRows $ws ($plan.ItLast + 1) $arr @('C')
+            $res.ItRows = $plan.ItNew.Count
+        }
+        $wsDe = $wb.Worksheets.Item('COO DE')
+        $first = $plan.DeLast + 1
+        if ($plan.DeNew.Count -gt 0) {
+            $arr = New-Object 'object[,]' $plan.DeNew.Count, 6
+            for ($i = 0; $i -lt $plan.DeNew.Count; $i++) {
+                $r = $plan.DeNew[$i]
+                $arr[$i, 0] = [double]$plan.Nr; $arr[$i, 1] = $r.Doc; $arr[$i, 2] = $r.Lot
+                $arr[$i, 3] = [double]$r.Pal; $arr[$i, 4] = [double]$r.Net; $arr[$i, 5] = [double]$r.Gross
+            }
+            Write-CooRows $wsDe $first $arr @('C')
+            for ($r = $first; $r -lt $first + $plan.DeNew.Count; $r++) {
+                if (-not $wsDe.Cells($r, 7).HasFormula -and $r -gt 2 -and $wsDe.Cells($r - 1, 7).HasFormula) {
+                    [void]$wsDe.Range("G$($r - 1):I$($r - 1)").Copy($wsDe.Range("G${r}:I${r}"))
+                }
+            }
+            $res.DeRows = $plan.DeNew.Count
+        }
+        if ($setForm) {
+            $wsF = $wb.Worksheets.Item('Formular IHK')
+            $cell = $wsF.Range('B6')
+            for ($r = 1; $r -le 15; $r++) {
+                if (([string]$wsF.Cells($r, 1).Value2).Trim() -eq 'Antragsnummer:') { $cell = $wsF.Cells($r, 2); break }
+            }
+            $cell.Value2 = [double]$plan.Nr
+        }
+        $h.Xl.Calculate()
+
+        $rowsToCheck = @($plan.DeExisting | ForEach-Object { $_.Row })
+        if ($plan.DeNew.Count -gt 0) { $rowsToCheck = @($first..($first + $plan.DeNew.Count - 1)) }
+        foreach ($r in $rowsToCheck) {
+            $res.DeCheck.Add(@{ Lot = [string]$wsDe.Cells($r, 3).Value2; Certs = [string]$wsDe.Cells($r, 7).Value2; Left = $wsDe.Cells($r, 9).Value2 })
+        }
+    } finally {
+        $h.Xl.Calculation = $calc
+    }
+    return $res
+}
+
+function Export-CooForm($h, [string]$pdfPath) {
+    # The sheet's stored printer is looked up on the network first (about 30 s); the local PDF printer
+    # avoids that. This only changes the printer of this hidden Excel, not the Windows default printer.
+    try {
+        $port = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Devices' -ErrorAction Stop).'Microsoft Print to PDF'
+        $m = [regex]::Match([string]$h.Xl.ActivePrinter, '^.* (\S+) \S+:$')
+        if ($port -and $m.Success) { $h.Xl.ActivePrinter = 'Microsoft Print to PDF ' + $m.Groups[1].Value + ' ' + ($port -split ',')[1] }
+    } catch { }
+    $h.Wb.Worksheets.Item('Formular IHK').ExportAsFixedFormat(0, $pdfPath)
+}
+
+function Show-CooIntro {
+    Write-Host "   CERTIFICATE OF ORIGIN   (beta)" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "   Needed in the Downloads folder:" -ForegroundColor Yellow
+    Write-Host "     - the ZIP with the attachments of the draft e-mail from Axium (Download all)," -ForegroundColor Gray
+    Write-Host "       whatever they are called: the Axium sales invoice and, for goods of Egyptian" -ForegroundColor Gray
+    Write-Host "       origin, the Italian certificates. The draft number comes from the ZIP name." -ForegroundColor Gray
+    Write-Host "     - and/or the issued certificate from the IHK: COO_<number>_<customer>.pdf," -ForegroundColor Gray
+    Write-Host "       ..._digital_CoO.pdf or ..._cert_doc.pdf" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "   What happens:" -ForegroundColor Yellow
+    Write-Host "     Draft, Egypt : new Italian certificates go to 'COO Italy', the invoice lots to 'COO DE'," -ForegroundColor Gray
+    Write-Host "                    the IHK form is saved as PDF in 'Coo IHK Formulare' and new Italian" -ForegroundColor Gray
+    Write-Host "                    certificates are filed in 'Coo Italy'." -ForegroundColor Gray
+    Write-Host "     Draft, Italy : nothing to calculate, a summary to check the IHK draft is shown." -ForegroundColor Gray
+    Write-Host "     Certificate  : moved to the customer folder as COO_<number>_<customer>.pdf." -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "   Nothing is written or moved before you confirm." -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host $light -ForegroundColor DarkCyan
+    Write-Host "   Enter = start     Esc = back" -ForegroundColor DarkGray
+    while ($true) {
+        $k = [Console]::ReadKey($true)
+        if ($k.Key -eq 'Enter') { return $true }
+        if ($k.Key -eq 'Escape' -or $k.Key -eq 'Backspace') { return $false }
+    }
+}
+
+function Show-CooInvoice($inv) {
+    $date = if ($inv.Date) { " of " + $inv.Date } else { "" }
+    Write-Host ("   Invoice   : " + $inv.Number + $date + "   " + $inv.Customer) -ForegroundColor Gray
+    foreach ($it in $inv.Items) {
+        $org = $it.Origin
+        if ($IsoCountry.ContainsKey($org)) { $org = $org + " (" + $IsoCountry[$org] + ")" }
+        Write-Host ("     " + $it.Item + "  " + $it.Desc + "   " + $it.Qty.ToString('#,##0', $UnitsDe) + " " + $it.Uom + "   origin " + $org) -ForegroundColor Gray
+        foreach ($l in $it.Lots) { Write-Host ("        lot " + $l.Lot.PadRight(10) + $l.Qty.ToString('#,##0', $UnitsDe).PadLeft(8) + " " + $it.Uom) -ForegroundColor DarkGray }
+    }
+    $tot = "     "
+    if ($null -ne $inv.Packages) { $tot += (Format-CooPal $inv.Packages) + " packages   " }
+    if ($null -ne $inv.Net) { $tot += "net " + (Format-CooKg $inv.Net) + " kg   " }
+    if ($null -ne $inv.Gross) { $tot += "gross " + (Format-CooKg $inv.Gross) + " kg" }
+    Write-Host $tot -ForegroundColor Gray
+    if ($null -ne $inv.Net -and $null -ne $inv.Gross -and $inv.Net -gt $inv.Gross) {
+        Write-Host "     Net weight is higher than gross weight on the invoice - check the IHK draft." -ForegroundColor Red
+    }
+}
+
+function Show-CooPlan($plan, [string]$pdfPath, $fileCerts) {
+    $inv = $plan.Invoice
+    if ($plan.EaPerPal) { Write-Host ("     " + $plan.EaPerPal.ToString('#,##0.##', $UnitsDe) + " EA per pallet (rule of three)") -ForegroundColor DarkGray }
+    Write-Host ""
+    Write-Host "   Italian certificates in the ZIP" -ForegroundColor Yellow
+    if ($plan.CertInfo.Count -eq 0) { Write-Host "     (none)" -ForegroundColor DarkGray }
+    foreach ($ci in $plan.CertInfo) {
+        $c = $ci.Cert
+        $line = "     " + $c.Number + "  " + $c.Doc + "  " + (Format-CooPal ([double]$c.Pallets)) + " pallets   net " + (Format-CooKg ([double]$c.Net)) + "   gross " + (Format-CooKg ([double]$c.Gross))
+        Write-Host $line -ForegroundColor Gray
+        if ($c.Swapped) { Write-Host "       net and gross were swapped on the certificate, corrected" -ForegroundColor DarkYellow }
+        $tq = 0.0; foreach ($l in $c.Lots) { if ($l.Qty) { $tq += $l.Qty } }
+        if ($tq -gt 0 -and $c.Pallets -and [math]::Abs($tq / $c.Pallets - 1200) -gt 60) {
+            Write-Host ("       " + $tq.ToString('#,##0', $UnitsDe) + " EA on " + $c.Pallets + " pallets (" + ($tq / $c.Pallets).ToString('#,##0', $UnitsDe) + " EA per pallet) - check the pallet count") -ForegroundColor DarkYellow
+        }
+        $color = if ($ci.Status -eq 'new') { 'Green' } elseif ($ci.Status -match '^already') { 'DarkGray' } else { 'Yellow' }
+        Write-Host ("       " + $ci.Status) -ForegroundColor $color
+        foreach ($r in @($ci.Rows)) {
+            Write-Host ("         " + $r.Lot.PadRight(10) + (Format-CooPal $r.Pal).PadLeft(7) + " PAL" + (Format-CooKg $r.Net).PadLeft(12) + (Format-CooKg $r.Gross).PadLeft(12)) -ForegroundColor Green
+        }
+    }
+    Write-Host ""
+    if ($plan.DeExisting.Count -gt 0) {
+        Write-Host ("   'COO DE' already has " + $plan.DeExisting.Count + " row(s) for " + $plan.Nr + ", nothing is added there") -ForegroundColor Yellow
+        $show = $plan.DeExisting
+        $color = 'DarkGray'
+    } else {
+        Write-Host ("   New rows for 'COO DE'   (Antrags-Nr. " + $plan.Nr + ")") -ForegroundColor Yellow
+        $show = $plan.DeNew
+        $color = 'Green'
+    }
+    Write-Host ("     " + "Lot".PadRight(10) + "PAL".PadLeft(7) + "Net kg".PadLeft(12) + "Gross kg".PadLeft(12) + "   " + "COO IT".PadRight(28) + "left kg".PadLeft(10)) -ForegroundColor DarkGray
+    foreach ($r in $show) {
+        $cov = $plan.Coverage[(ConvertTo-CooKey $r.Lot)]
+        $certs = ''; $left = ''
+        $lc = $color
+        if ($cov) {
+            $certs = ($cov.Certs -join ', ')
+            $left = Format-CooKg $cov.Left
+            if ($cov.Certs.Count -eq 0 -or $cov.Left -lt -0.005) { $lc = 'Red' }
+        }
+        if ($certs.Length -gt 28) { $certs = $certs.Substring(0, 25) + '...' }
+        Write-Host ("     " + ([string]$r.Lot).PadRight(10) + (Format-CooPal $r.Pal).PadLeft(7) + (Format-CooKg $r.Net).PadLeft(12) + (Format-CooKg $r.Gross).PadLeft(12) + "   " + $certs.PadRight(28) + $left.PadLeft(10)) -ForegroundColor $lc
+    }
+    if ($plan.DeExisting.Count -gt 0) {
+        if ($plan.ExistingDiffers) {
+            Write-Host "     These rows differ from the invoice, the invoice gives:" -ForegroundColor Red
+            foreach ($r in $plan.Computed) {
+                Write-Host ("     " + ([string]$r.Lot).PadRight(10) + (Format-CooPal $r.Pal).PadLeft(7) + (Format-CooKg $r.Net).PadLeft(12) + (Format-CooKg $r.Gross).PadLeft(12)) -ForegroundColor Red
+            }
+        } else {
+            Write-Host "     They match the invoice." -ForegroundColor DarkGreen
+        }
+    }
+    foreach ($n in $plan.Notes) { Write-Host ("     " + $n) -ForegroundColor DarkYellow }
+    foreach ($w in $plan.Warnings) { Write-Host ("     " + $w) -ForegroundColor Red }
+    Write-Host ""
+    if ($pdfPath) {
+        $exists = if (Test-Path -LiteralPath $pdfPath) { "   (replaces the existing file)" } else { "" }
+        Write-Host ("   IHK form : " + $CooFormDirName + "\" + [System.IO.Path]::GetFileName($pdfPath) + $exists) -ForegroundColor Gray
+    }
+    foreach ($f in $fileCerts) { Write-Host ("   File     : " + $CooItalyDirName + "\" + $f.Target) -ForegroundColor Gray }
+}
+
+function Get-CooFormPath([string]$cooDir, [string]$nr) {
+    # An existing form for this number is replaced under its name, otherwise the current naming is used
+    $dir = Join-Path $cooDir $CooFormDirName
+    $old = @(Get-ChildItem -LiteralPath $dir -Filter '*.pdf' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match ('(?<!\d)' + $nr + '(?!\d)') -and $_.Name -notmatch '(?i)cancel' } | Sort-Object LastWriteTime -Descending)
+    if ($old.Count -gt 0) { return $old[0].FullName }
+    return (Join-Path $dir ("COO " + $nr + "_IHK Formulare.pdf"))
+}
+
+function Get-CooCertsToFile($case, [string]$cooDir) {
+    # New Italian certificates go to "Coo Italy" as "CO Italia_Lot <lots>_<number>.pdf", unless that certificate is already there
+    $dir = Join-Path $cooDir $CooItalyDirName
+    $have = @(Get-ChildItem -LiteralPath $dir -Filter '*.pdf' -ErrorAction SilentlyContinue)
+    $hashes = $null
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($c in $case.Certs) {
+        if (@($have | Where-Object { $_.Name -match [regex]::Escape($c.Number) }).Count -gt 0) { continue }
+        if ($null -eq $hashes) { $hashes = @{}; foreach ($f in $have) { try { $hashes[(Get-FileHash -LiteralPath $f.FullName -Algorithm MD5).Hash] = $true } catch { } } }
+        if ($hashes.ContainsKey((Get-FileHash -LiteralPath $c.File -Algorithm MD5).Hash)) { continue }
+        $name = "CO Italia_Lot " + (@($c.Lots | ForEach-Object { $_.Lot }) -join ' + ') + "_" + $c.Number + ".pdf"
+        $out.Add(@{ Cert = $c; Source = $c.File; Target = $name; Path = (Join-Path $dir $name) })
+    }
+    return ,$out
+}
+
+function Invoke-CooZip($sel, [string]$cooDir, [string]$wbPath) {
+    $case = $null
+    $h = $null
+    try {
+        Write-Host ("   ZIP       : " + $sel.File.Name) -ForegroundColor DarkGray
+        $case = Read-CooZip $sel.File.FullName
+        if ($case.Invoices.Count -eq 0) {
+            if ($case.Finals.Count -gt 0) {
+                Write-Host "   This ZIP holds documents already issued by the IHK:" -ForegroundColor Yellow
+                foreach ($x in $case.Finals) { Write-Host ("     " + $x) -ForegroundColor DarkGray }
+                Write-Host "   Unpack them into the Downloads folder, then they are offered for filing." -ForegroundColor DarkGray
+            } else {
+                Write-Host "   No Axium sales invoice found in the ZIP." -ForegroundColor Red
+                foreach ($x in $case.Other) { Write-Host ("     not used: " + $x) -ForegroundColor DarkGray }
+            }
+            return
+        }
+        if ($case.Invoices.Count -gt 1) {
+            Write-Host ("   The ZIP has " + $case.Invoices.Count + " invoices, only " + $case.Invoices[0].Number + " is used.") -ForegroundColor Yellow
+        }
+        $inv = $case.Invoices[0]
+        $nr = $sel.Nr
+        if (-not $nr -and $case.DraftNr) {
+            $nr = $case.DraftNr
+            Write-Host "   The draft number is taken from the IHK draft in the ZIP." -ForegroundColor DarkGray
+        }
+        while (-not $nr) {
+            $t = Read-Host "   Draft number (8 digits, x = cancel)"
+            if ($t -match '^\s*x\s*$') { return }
+            if ($t -match '^\s*(\d{8})\s*$') { $nr = $matches[1] }
+        }
+        Write-Host ("   Draft no. : " + $nr) -ForegroundColor Cyan
+        Show-CooInvoice $inv
+        foreach ($o in $case.Other) { Write-Host ("   not used  : " + $o) -ForegroundColor DarkGray }
+
+        $eg = @($inv.Items | Where-Object { $_.Origin -eq 'EG' })
+        $forEgypt = ($eg.Count -gt 0)
+        if ($forEgypt -and $eg.Count -lt $inv.Items.Count -and $case.Certs.Count -eq 0) {
+            Write-Host ""
+            Write-Host "   The invoice has goods of Egyptian and of other origin, and the ZIP has no Italian certificates." -ForegroundColor Yellow
+            $a = Read-Host "   Is this draft for the Egyptian goods? (Y/N)"
+            $forEgypt = ($a -match '^\s*[yj]')
+        }
+        if (-not $forEgypt) {
+            Write-Host ""
+            Write-Host $light -ForegroundColor DarkCyan
+            $orgs = @($inv.Items | ForEach-Object { $_.Origin } | Select-Object -Unique)
+            $names = @($orgs | ForEach-Object { if ($IsoCountry.ContainsKey($_)) { $IsoCountry[$_] } else { $_ } })
+            Write-Host ("   Origin " + ($names -join ', ') + ": nothing to enter in " + $CooWorkbookName + ", no IHK form needed.") -ForegroundColor Green
+            Write-Host "   Check the IHK draft against the invoice above: origin, lots and quantities, net and gross weight." -ForegroundColor Gray
+            if ($orgs -contains 'IT') {
+                Write-Host "   For Italian goods the draft needs the declaration of pure Italian origin (manufacturer CEDIC S.R.L.)." -ForegroundColor DarkGray
+            }
+            return
+        }
+
+        $totals = Get-CooEgyptTotals $inv $case.Certs
+        if (@($inv.Items | Where-Object { $_.Origin -ne 'EG' }).Count -gt 0 -or -not $totals) {
+            Write-Host ""
+            if (@($inv.Items | Where-Object { $_.Origin -ne 'EG' }).Count -gt 0) {
+                Write-Host "   The invoice also has goods of other origin, its totals cannot be used." -ForegroundColor Yellow
+            } else {
+                Write-Host "   Pallets or weights could not be read from the invoice." -ForegroundColor Yellow
+            }
+            Write-Host "   Enter the values of the Egyptian goods from the IHK draft (Enter = suggestion, x = cancel):" -ForegroundColor Gray
+            $t = @{ Packages = $null; Net = $null; Gross = $null }
+            foreach ($k in @(@('Packages', 'Pallets'), @('Net', 'Net weight kg'), @('Gross', 'Gross weight kg'))) {
+                $def = $null
+                if ($totals) { $def = $totals[$k[0]] }
+                while ($null -eq $t[$k[0]]) {
+                    $p = "     " + $k[1].PadRight(16)
+                    if ($null -ne $def) { $p += " [" + $def.ToString('0.##', $UnitsDe) + "]" }
+                    $a = Read-Host $p
+                    if ($a -match '^\s*x\s*$') { return }
+                    if (-not $a.Trim() -and $null -ne $def) { $t[$k[0]] = [double]$def }
+                    elseif ($a.Trim()) { $t[$k[0]] = ConvertFrom-CooNumber $a.Trim() }
+                }
+            }
+            $totals = $t
+        }
+
+        $lock = Join-Path $cooDir ('~$' + $CooWorkbookName)
+        if (Test-Path -LiteralPath $lock) {
+            Write-Host ""
+            Write-Host ("   " + $CooWorkbookName + " is open (by you or a colleague). Close it and run this again.") -ForegroundColor Red
+            Write-Host "   If nobody has it open, an interrupted run may have left a hidden Excel: end EXCEL.EXE in the Task Manager." -ForegroundColor DarkGray
+            return
+        }
+        $spin = Start-Spin ("opening " + $CooWorkbookName + " in Excel...")
+        try { $h = Open-CooWorkbook $wbPath } finally { Stop-Spin $spin }
+        if ($h.Wb.ReadOnly) {
+            Write-Host ("   " + $CooWorkbookName + " is open elsewhere (read-only). Close it and run this again.") -ForegroundColor Red
+            Write-Host "   If nobody has it open, an interrupted run may have left a hidden Excel: end EXCEL.EXE in the Task Manager." -ForegroundColor DarkGray
+            return
+        }
+        foreach ($sn in @('COO Italy', 'COO DE', 'Formular IHK')) {
+            try { [void]$h.Wb.Worksheets.Item($sn) } catch { Write-Host ("   Sheet '" + $sn + "' not found in " + $CooWorkbookName + ".") -ForegroundColor Red; return }
+        }
+        $spin = Start-Spin "checking the workbook..."
+        try { $plan = Get-CooPlan $case $nr $h.Wb $totals } finally { Stop-Spin $spin }
+        $pdfPath = Get-CooFormPath $cooDir $nr
+        $fileCerts = Get-CooCertsToFile $case $cooDir
+        Show-CooPlan $plan $pdfPath $fileCerts
+
+        $rows = $plan.ItNew.Count + $plan.DeNew.Count
+        if ($plan.DeNew.Count -eq 0 -and $plan.DeExisting.Count -eq 0) {
+            Write-Host ""
+            Write-Host "   No rows for 'COO DE' could be worked out, so no IHK form is made. Please enter it by hand." -ForegroundColor Red
+            $pdfPath = ''
+            if ($plan.ItNew.Count -eq 0 -and $fileCerts.Count -eq 0) { return }
+        }
+        Write-Host ""
+        Write-Host $light -ForegroundColor DarkCyan
+        $what = New-Object System.Collections.Generic.List[string]
+        if ($rows -gt 0) { $what.Add("write " + $rows + " row(s) to " + $CooWorkbookName) }
+        if ($pdfPath) { $what.Add("save the IHK form") }
+        if ($fileCerts.Count -gt 0) { $what.Add("file " + $fileCerts.Count + " Italian certificate(s)") }
+        $q = ($what -join ', ')
+        $ans = Read-Host ("   " + $q.Substring(0, 1).ToUpper() + $q.Substring(1) + "? (Y/N)")
+        if (-not ($ans -match '^\s*[yj]')) {
+            Write-Host "   Cancelled, nothing was changed." -ForegroundColor DarkGray
+            return
+        }
+
+        if ($rows -gt 0) {
+            $bdir = Join-Path $AppDir '_coo_backup'
+            try {
+                if (-not (Test-Path -LiteralPath $bdir)) { New-Item -ItemType Directory -Path $bdir | Out-Null }
+                Copy-Item -LiteralPath $wbPath -Destination (Join-Path $bdir ([System.IO.Path]::GetFileNameWithoutExtension($CooWorkbookName) + '_' + (Get-Date -Format 'yyyy-MM-dd_HHmmss') + '.xlsx')) -ErrorAction Stop
+                @(Get-ChildItem -LiteralPath $bdir -Filter '*.xlsx' | Sort-Object LastWriteTime -Descending | Select-Object -Skip 20) | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+            } catch {
+                Write-Host ("   Could not back up " + $CooWorkbookName + ": " + $_.Exception.Message) -ForegroundColor Red
+                return
+            }
+        }
+        $res = @{ ItRows = 0; DeRows = 0; DeCheck = @() }
+        if ($rows -gt 0 -or $pdfPath) {
+            $spin = Start-Spin ("writing " + $CooWorkbookName + " (Excel recalculates, ~30 s)...")
+            try {
+                $res = Invoke-CooWrite $h $plan ([bool]$pdfPath)
+                $h.Wb.Save()
+            } finally { Stop-Spin $spin }
+        }
+        $pdfDone = $false
+        if ($pdfPath) {
+            $spin = Start-Spin "saving the IHK form as PDF..."
+            try {
+                Export-CooForm $h $pdfPath
+                $pdfDone = $true
+            } catch {
+                Stop-Spin $spin; $spin = $null
+                Write-Host ("   Could not save the IHK form: " + $_.Exception.Message) -ForegroundColor Red
+            } finally { Stop-Spin $spin }
+        }
+        Close-CooWorkbook $h $false
+        $h = $null
+
+        Write-Host ""
+        if ($res.ItRows -gt 0) { Write-Host ("   COO Italy : " + $res.ItRows + " row(s) added") -ForegroundColor Green }
+        if ($res.DeRows -gt 0) { Write-Host ("   COO DE    : " + $res.DeRows + " row(s) added") -ForegroundColor Green }
+        foreach ($c in $res.DeCheck) {
+            $left = ConvertTo-CooDouble $c.Left
+            $color = if ($left -lt -0.005 -or -not $c.Certs) { 'Red' } else { 'DarkGray' }
+            Write-Host ("     " + $c.Lot.PadRight(10) + (($c.Certs -replace "`n", ', ')).PadRight(30) + " left " + (Format-CooKg $left) + " kg") -ForegroundColor $color
+        }
+        if ($pdfDone) { Write-Host ("   IHK form  : " + $CooFormDirName + "\" + [System.IO.Path]::GetFileName($pdfPath)) -ForegroundColor Green }
+        foreach ($f in $fileCerts) {
+            try {
+                Copy-Item -LiteralPath $f.Source -Destination $f.Path -ErrorAction Stop
+                Write-Host ("   Filed     : " + $f.Target) -ForegroundColor Green
+            } catch {
+                Write-Host ("   Could not file " + $f.Target + ": " + $_.Exception.Message) -ForegroundColor Red
+            }
+        }
+        if ($pdfDone) { try { Start-Process -FilePath $pdfPath } catch { } }
+    } catch {
+        Write-Host ("   ERROR: " + $_.Exception.Message) -ForegroundColor Red
+    } finally {
+        if ($h) { Close-CooWorkbook $h $false }
+        if ($case -and $case.Temp) { try { Remove-Item -LiteralPath $case.Temp -Recurse -Force -ErrorAction SilentlyContinue } catch { } }
+    }
+}
+
+function Read-CooPdfText([string]$path, $cache) {
+    # Text of a PDF for the certificate checks, read once per file version
+    $fi = Get-Item -LiteralPath $path
+    $key = $fi.FullName + '|' + $fi.LastWriteTimeUtc.Ticks
+    if ($cache.ContainsKey($key)) { return $cache[$key] }
+    $t = ''
+    try { $t = (Get-PdfLines $path) -join "`n" } catch { $t = '' }
+    $cache[$key] = $t
+    return $t
+}
+
+function Get-CooFinalNumber([string]$text) {
+    # Number of an issued certificate: IHK-stamped invoice, printout of the electronic certificate
+    $m = [regex]::Match($text, '(?i)corresponding\s+to\s+CoO:?\s*(\d{8})')
+    if ($m.Success) { return $m.Groups[1].Value }
+    $m = [regex]::Match($text, '(?i)(?:Certificate of Origin|Ursprungszeugnisses?)\s+(?:No\.?|Nr\.?)\s*(\d{8})')
+    if ($m.Success) { return $m.Groups[1].Value }
+    if ($text -match '(?i)cert\.ihk\.de|DIGITALLY SIGNED') {
+        $n = Get-CooNumbers $text
+        if ($n.Count -gt 0) { return $n[0] }
+    }
+    return ''
+}
+
+function ConvertTo-CooShort([string]$s) {
+    return ((($s -replace '\s+', '_') -replace '[\\/:*?"<>|]', '').Trim('_', ' ', '.'))
+}
+
+function Get-CooShortName([string]$dir, [string]$folderName) {
+    # Customer part of the newest certificate file in the folder, so new files follow the current naming:
+    # COO_40780920_Tamer.pdf -> Tamer, Coo_40068271_MPC_UAE.pdf -> MPC_UAE, Coo Seeder Qatar_40017837.pdf -> Seeder_Qatar
+    $files = @(Get-ChildItem -LiteralPath $dir -Filter '*.pdf' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending |
+        Where-Object { $_.BaseName -notmatch '(?i)cert_doc|digital|IHK|Nachweis|DELETED' })
+    foreach ($f in $files) { if ($f.BaseName -cmatch '^COO_\d{8}_(.+)$') { return (ConvertTo-CooShort $matches[1]) } }
+    foreach ($f in $files) {
+        if ($f.BaseName -match '(?i)^co[oc][ _]*\d{8}[ _]+(.+)$') { return (ConvertTo-CooShort $matches[1]) }
+        if ($f.BaseName -match '(?i)^co[oc][ _]+(.+?)[ _]+\d{8}(?:[ _]\d{6})?$') { return (ConvertTo-CooShort $matches[1]) }
+    }
+    $w = @($folderName -split '[^A-Za-z0-9]+' | Where-Object { $_ })
+    if ($w.Count -gt 0) { return $w[0] }
+    return 'Customer'
+}
+
+function Get-CooCustomerFolders([string]$cooDir) {
+    # Subfolders of the COO folder (customer folders) with the words that point to them: the words of the
+    # folder name, all names of a country in it (SA -> saudi arabia) and the customer part of its file names
+    $res = New-Object System.Collections.Generic.List[object]
+    foreach ($d in @(Get-ChildItem -LiteralPath $cooDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name)) {
+        if ($d.Name -eq $CooFormDirName -or $d.Name -eq $CooItalyDirName -or $d.Name -match '^[_~.]') { continue }
+        $short = Get-CooShortName $d.FullName $d.Name
+        $words = New-Object System.Collections.Generic.List[string]
+        foreach ($w in (($d.Name + ' ' + $short) -split '[^A-Za-z]+')) {
+            if ($w.Length -lt 2) { continue }
+            $lw = $w.ToLower()
+            if (-not $words.Contains($lw)) { $words.Add($lw) }
+            foreach ($code in $CountryNames.Keys) {
+                if ($code -eq $w.ToUpper() -or $CountryNames[$code] -contains $lw) {
+                    foreach ($v in $CountryNames[$code]) { if (-not $words.Contains($v)) { $words.Add($v) } }
+                }
+            }
+        }
+        $res.Add(@{ Name = $d.Name; Path = $d.FullName; Short = $short; Words = $words })
+    }
+    return ,$res
+}
+
+function Find-CooCustomerFolder($folders, [string[]]$names, [string]$text) {
+    # A folder word in a file name counts 3, in the document text 1; no clear winner = not recognized
+    $nameWords = New-Object System.Collections.Generic.List[string]
+    foreach ($n in $names) {
+        foreach ($w in (($n -replace '(?i)\.pdf$', '') -split '[^A-Za-z]+')) {
+            $lw = $w.ToLower()
+            if ($lw.Length -ge 3 -and $lw -notmatch '^(coo|coc|cert|doc|digital|sord|scan|ihk|formular|formulare|deleted|copy|kopie|original|final)$') { $nameWords.Add($lw) }
+        }
+    }
+    $ft = ''
+    if ($text) { $ft = ' ' + (Fold-Text $text) + ' ' }
+    $best = $null; $bestScore = 0; $second = 0
+    foreach ($f in $folders) {
+        $score = 0
+        foreach ($w in $f.Words) {
+            if ($w.Length -lt 3) { continue }
+            if ($nameWords.Contains($w)) { $score += 3 }
+            elseif ($ft -and $ft -match ('[^a-z]' + [regex]::Escape($w) + '[^a-z]')) { $score += 1 }
+        }
+        if ($score -gt $bestScore) { $second = $bestScore; $bestScore = $score; $best = $f }
+        elseif ($score -gt $second) { $second = $score }
+    }
+    if ($bestScore -gt 0 -and $bestScore -gt $second) { return $best }
+    return $null
+}
+
+function Get-CooFinals($folders, $cache) {
+    # Issued certificates from the IHK in the Downloads folder (scans named COO_<number>_..., IHK downloads
+    # ..._digital_CoO / ..._cert_doc), grouped by certificate number
+    $groups = New-Object System.Collections.Generic.List[object]
+    $byNr = @{}
+    foreach ($f in @(Get-ChildItem -LiteralPath $WorkDir -Filter '*.pdf' -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+        $n = $f.BaseName
+        if ($n -match '(?i)IHK Formular|^(PWS|PAC|WP)\d|^DELETED|draft|entwurf') { continue }
+        if ($n -notmatch '(?i)(^|[^a-z])co[oc]([^a-z]|$)|cert_doc|digital|ursprung|origin|certificate') { continue }
+        $nr = Get-CooNumberFromName $n
+        $text = $null
+        if (-not $nr) {
+            $text = Read-CooPdfText $f.FullName $cache
+            if ($text -match '(?i)ENTWURF|DRAFT') { continue }
+            $nr = Get-CooFinalNumber $text
+            if (-not $nr) { continue }
+        }
+        if (-not $byNr.ContainsKey($nr)) {
+            $byNr[$nr] = @{ Nr = $nr; Files = (New-Object System.Collections.Generic.List[object]); Folder = $null; How = '' }
+            $groups.Add($byNr[$nr])
+        }
+        $byNr[$nr].Files.Add(@{ Path = $f.FullName; Name = $f.Name; Text = $text })
+    }
+    foreach ($g in $groups) {
+        $names = @($g.Files | ForEach-Object { $_.Name })
+        $g.Folder = Find-CooCustomerFolder $folders $names ''
+        $g.How = 'from the file name'
+        if (-not $g.Folder) {
+            $sb = New-Object System.Text.StringBuilder
+            foreach ($f in $g.Files) {
+                if ($null -eq $f.Text) { $f.Text = Read-CooPdfText $f.Path $cache }
+                [void]$sb.Append($f.Text)
+                [void]$sb.Append("`n")
+            }
+            $g.Folder = Find-CooCustomerFolder $folders $names $sb.ToString()
+            $g.How = 'from the document'
+        }
+    }
+    return ,$groups
+}
+
+function Get-CooFinalTargets($group, $folder) {
+    # IHK downloads and files already named COO_<number>_<this customer> keep their name, everything else becomes
+    # COO_<number>_<customer>.pdf. A file that is already in the folder (same content, any name) is marked 'same';
+    # a different file with the target name is never replaced, the new one gets " (2)".
+    $out = New-Object System.Collections.Generic.List[object]
+    $have = @(Get-ChildItem -LiteralPath $folder.Path -File -ErrorAction SilentlyContinue)
+    $used = @{}
+    foreach ($f in $group.Files) {
+        $len = (Get-Item -LiteralPath $f.Path).Length
+        $hash = $null
+        $same = $null
+        foreach ($x in $have) {
+            if ($x.Length -ne $len) { continue }
+            if ($null -eq $hash) { $hash = (Get-FileHash -LiteralPath $f.Path -Algorithm MD5).Hash }
+            if ((Get-FileHash -LiteralPath $x.FullName -Algorithm MD5).Hash -eq $hash) { $same = $x.Name; break }
+        }
+        if ($same) {
+            $out.Add(@{ File = $f; Name = $same; Target = (Join-Path $folder.Path $same); State = 'same' })
+            continue
+        }
+        $name = $f.Name
+        $keep = ($name -match '(?i)_(cert_doc|digital_CoO)')
+        if (-not $keep -and $name -cmatch ('^COO_' + $group.Nr + '_(.+)\.pdf$')) {
+            # already in the current naming: kept when it names this customer
+            foreach ($w in ($matches[1] -split '[^A-Za-z]+')) { if ($w.Length -ge 3 -and $folder.Words.Contains($w.ToLower())) { $keep = $true } }
+        }
+        if (-not $keep) { $name = 'COO_' + $group.Nr + '_' + $folder.Short + '.pdf' }
+        $base = [System.IO.Path]::GetFileNameWithoutExtension($name)
+        $k = 1
+        while ($used.ContainsKey($name.ToLower()) -or (Test-Path -LiteralPath (Join-Path $folder.Path $name))) {
+            $k++
+            $name = $base + ' (' + $k + ').pdf'
+        }
+        $used[$name.ToLower()] = $true
+        $out.Add(@{ File = $f; Name = $name; Target = (Join-Path $folder.Path $name); State = 'new' })
+    }
+    return ,$out
+}
+
+function Invoke-CooFile($group, $folders) {
+    # Moves the files of one issued certificate into the customer folder. -1 = back without doing anything.
+    $folder = $group.Folder
+    $how = $group.How
+    while ($true) {
+        $entries = New-Object System.Collections.Generic.List[object]
+        $entries.Add(@{ Text = ("Certificate of origin " + $group.Nr); Header = $true })
+        $entries.Add(@{ Text = ""; Header = $true })
+        $targets = $null
+        if ($folder) {
+            $entries.Add(@{ Text = ("Customer folder: " + $folder.Name + "   (" + $how + ")"); Header = $true })
+            $targets = Get-CooFinalTargets $group $folder
+            foreach ($t in $targets) {
+                $txt = "  " + $t.File.Name
+                if ($t.State -eq 'same') { $txt += "   already there as " + $t.Name + ", only removed from Downloads" }
+                elseif ($t.Name -ne $t.File.Name) { $txt += "   -> " + $t.Name }
+                $entries.Add(@{ Text = $txt; Header = $true })
+            }
+        } else {
+            $entries.Add(@{ Text = "Customer not recognized, please choose the folder."; Header = $true })
+            foreach ($f in $group.Files) { $entries.Add(@{ Text = ("  " + $f.Name); Header = $true }) }
+        }
+        $entries.Add(@{ Text = ""; Header = $true })
+        if ($folder) { $entries.Add(@{ Text = ("[ Move to " + $folder.Name + " ]"); Header = $false; Act = 'MOVE' }) }
+        $entries.Add(@{ Text = "[ Choose customer folder ]"; Header = $false; Act = 'PICK' })
+        $entries.Add(@{ Text = "[ Back ]"; Header = $false; Act = 'BACK' })
+        $sel = Show-DocMenu "FILE CERTIFICATE OF ORIGIN" $entries.ToArray()
+        if ($sel -lt 0 -or $entries[$sel].Act -eq 'BACK') { return -1 }
+        if ($entries[$sel].Act -eq 'PICK') {
+            if ($folders.Count -eq 0) { continue }
+            $items = @($folders | ForEach-Object { $_.Name })
+            $c = Show-Menu "CUSTOMER FOLDER FOR CERTIFICATE $($group.Nr)" ($items + @("", "Back"))
+            if ($c -ge 0 -and $c -lt $folders.Count) { $folder = $folders[$c]; $how = 'chosen' }
+            continue
+        }
+
+        Clear-Host
+        Show-Header
+        Write-Host ""
+        $n = 0
+        foreach ($t in $targets) {
+            if ($t.State -eq 'same') {
+                try {
+                    Remove-Item -LiteralPath $t.File.Path -Force -ErrorAction Stop
+                    Write-Host ("  " + $t.File.Name + ": already in " + $folder.Name + ", removed from Downloads") -ForegroundColor DarkGray
+                } catch {
+                    Write-Host ("  Could not remove " + $t.File.Name + ": " + $_.Exception.Message) -ForegroundColor Red
+                }
+                continue
+            }
+            if (Move-FileSafe $t.File.Path $t.Target) {
+                Write-Host ("  Moved " + $t.File.Name + " -> " + $folder.Name + "\" + $t.Name) -ForegroundColor Green
+                $n++
+            }
+        }
+        return $n
+    }
+}
+
+function Invoke-Coo {
+    if (-not (Show-CooIntro)) { $script:SkipPause = $true; return }
+    Clear-Host
+    Show-Header
+    Write-Host ""
+
+    $cooDir = Get-OrAskFolder 'COODIR' "Select the COO folder (contains 'COO calculation.xlsx')"
+    if (-not $cooDir) { Write-Host "   No COO folder selected. Set it under Settings." -ForegroundColor Yellow; return }
+    $wbPath = Join-Path $cooDir $CooWorkbookName
+    if (-not (Test-Path -LiteralPath $wbPath)) {
+        Write-Host ("   '" + $CooWorkbookName + "' not found in " + $cooDir) -ForegroundColor Red
+        Write-Host "   Check the COO folder under Settings." -ForegroundColor DarkGray
+        return
+    }
+
+    $cache = @{}
+    $again = $false
+    while ($true) {
+        $spin = Start-Spin "looking for draft ZIPs and certificates in the Downloads folder..."
+        try {
+            $zips = Get-CooZips $cooDir
+            $folders = Get-CooCustomerFolders $cooDir
+            $finals = Get-CooFinals $folders $cache
+        } finally { Stop-Spin $spin }
+
+        $count = $zips.Count + $finals.Count
+        if ($count -eq 0) {
+            if ($again) { $script:SkipPause = $true; return }
+            Write-Host "   Nothing found in the Downloads folder:" -ForegroundColor Yellow
+            Write-Host "   - draft e-mail from Axium: save its attachments with 'Download all' as ZIP" -ForegroundColor DarkGray
+            Write-Host "   - issued certificate from the IHK: save the PDF" -ForegroundColor DarkGray
+            Write-Host ("   into " + $WorkDir) -ForegroundColor DarkGray
+            return
+        }
+        if ($count -eq 1 -and -not $again) {
+            if ($zips.Count -eq 1) { Invoke-CooZip $zips[0] $cooDir $wbPath }
+            elseif ((Invoke-CooFile $finals[0] $folders) -lt 0) { $script:SkipPause = $true }
+            return
+        }
+
+        $entries = New-Object System.Collections.Generic.List[object]
+        $entries.Add(@{ Text = "Draft e-mails (ZIP)   -> COO calculation.xlsx and IHK form"; Header = $true })
+        if ($zips.Count -eq 0) { $entries.Add(@{ Text = "(none)"; Header = $true }) }
+        foreach ($z in $zips) {
+            $nr = if ($z.Nr) { $z.Nr } else { '????????' }
+            $txt = $nr + "   " + $z.File.Name
+            if ($z.Done) { $txt += "   [IHK form exists]" }
+            $entries.Add(@{ Text = $txt; Header = $false; Act = 'ZIP'; Data = $z; Done = $z.Done })
+        }
+        $entries.Add(@{ Text = ""; Header = $true })
+        $entries.Add(@{ Text = "Issued certificates   -> customer folder"; Header = $true })
+        if ($finals.Count -eq 0) { $entries.Add(@{ Text = "(none)"; Header = $true }) }
+        foreach ($g in $finals) {
+            $dest = if ($g.Folder) { $g.Folder.Name } else { '(customer not recognized)' }
+            $what = if ($g.Files.Count -eq 1) { $g.Files[0].Name } else { [string]$g.Files.Count + " files" }
+            $entries.Add(@{ Text = ($g.Nr + "   -> " + $dest + "   (" + $what + ")"); Header = $false; Act = 'FILE'; Data = $g })
+        }
+        $entries.Add(@{ Text = ""; Header = $true })
+        $entries.Add(@{ Text = "Back"; Header = $false; Act = 'BACK' })
+
+        $sel = Show-DocMenu "CERTIFICATE OF ORIGIN" $entries.ToArray()
+        if ($sel -lt 0 -or $entries[$sel].Act -eq 'BACK') { $script:SkipPause = $true; return }
+        $again = $true
+        $e = $entries[$sel]
+        Clear-Host
+        Show-Header
+        Write-Host ""
+        if ($e.Act -eq 'ZIP') {
+            Invoke-CooZip $e.Data $cooDir $wbPath
+        } elseif ((Invoke-CooFile $e.Data $folders) -lt 0) {
+            continue
+        }
+        Write-Host ""
+        Write-Host $light -ForegroundColor DarkCyan
+        Write-Host "   Press any key to continue..." -ForegroundColor DarkGray
+        [void][Console]::ReadKey($true)
+    }
+}
+
 function Format-Setting([string]$value, [int]$max) {
     if (-not $value) { return "(not set)" }
     if ($value.Length -le $max) { return $value }
@@ -3626,7 +5480,9 @@ function Invoke-Settings([bool]$requireAll) {
         $reprintText = if ($s['REPRINT']) { Format-Setting $s['REPRINT'] 46 } else { "(optional)" }
         $entries.Add(@{ Text = ("'Noch zu drucken' folder".PadRight(24) + ":  " + $reprintText); Header = $false; Act = 'REPRINT'; Done = $true })
         $entries.Add(@{ Text = ("Pump control folder".PadRight(24) + ":  " + (Format-Setting $s['PUMPCONTROL'] 46)); Header = $false; Act = 'PUMPCONTROL'; Done = [bool]$s['PUMPCONTROL'] })
-        $entries.Add(@{ Text = ("Halle M scan folder".PadRight(24) + ":  " + (Format-Setting $s['SCANDIR'] 40) + "   (beta)"); Header = $false; Act = 'SCANDIR'; Done = [bool]$s['SCANDIR'] })
+        $entries.Add(@{ Text = ("Halle M scan folder".PadRight(24) + ":  " + (Format-Setting $s['SCANDIR'] 46)); Header = $false; Act = 'SCANDIR'; Done = [bool]$s['SCANDIR'] })
+        $cooText = if ($s['COODIR']) { Format-Setting $s['COODIR'] 46 } else { "(optional)" }
+        $entries.Add(@{ Text = ("COO folder".PadRight(24) + ":  " + $cooText); Header = $false; Act = 'COODIR'; Done = $true })
         $bIdx = $script:DefaultBanner
         if ($s['BANNER'] -match '^\d+$') { $bIdx = [int]$s['BANNER'] }
         if ($bIdx -lt 0 -or $bIdx -ge $BannerStyles.Count) { $bIdx = $script:DefaultBanner }
@@ -3655,6 +5511,7 @@ function Invoke-Settings([bool]$requireAll) {
             'REPRINT'  { $p = Browse-ForFolder "Select the 'Noch zu drucken' folder"; if ($p) { Set-Setting 'REPRINT' $p } }
             'PUMPCONTROL' { $p = Browse-ForFolder "Select the PUMP CONTROL folder"; if ($p) { Set-Setting 'PUMPCONTROL' $p } }
             'SCANDIR'  { $p = Browse-ForFolder "Select the Halle M SCAN folder (signed delivery documents)"; if ($p) { Set-Setting 'SCANDIR' $p } }
+            'COODIR'   { $p = Browse-ForFolder "Select the COO folder (contains 'COO calculation.xlsx')"; if ($p) { Set-Setting 'COODIR' $p } }
             'WORKDIR'  {
                 $p = Browse-ForFolder "Select the DOWNLOADS folder (where the PDFs are downloaded)"
                 if ($p) { Set-Setting 'WORKDIR' $p; $script:WorkDir = $p.TrimEnd('\') }
@@ -3672,9 +5529,10 @@ function Invoke-Settings([bool]$requireAll) {
     }
 }
 
-$FuMenuLabel = $FuPrefix + " scan   (beta)"
-$FuMoveLabel = "Auto move " + $FuPrefix + " documents   (beta)"
-$mainItems = @("Auto rename/create documents", "Annotate WP documents", "Print", "Auto move to folders", $FuMenuLabel, $FuMoveLabel, "Settings", "", "Quit")
+$FuMenuLabel = $FuPrefix + " scan"
+$FuMoveLabel = "Auto move " + $FuPrefix + " documents"
+$CooMenuLabel = "Certificate of Origin   (beta)"
+$mainItems = @("Auto rename/create documents", "Annotate WP documents", "Print", "Auto move to folders", $FuMenuLabel, $FuMoveLabel, $CooMenuLabel, "Settings", "", "Quit")
 
 $cfgWork = Get-Setting 'WORKDIR'
 if ($cfgWork -and (Test-Path -LiteralPath $cfgWork)) { $WorkDir = $cfgWork.TrimEnd('\') }
@@ -3710,6 +5568,7 @@ try {
             "Auto move to folders"  { Invoke-Move }
             $FuMenuLabel            { Invoke-FuScan }
             $FuMoveLabel            { Invoke-FuMove }
+            $CooMenuLabel           { Invoke-Coo }
             "Settings"              { Invoke-Settings $false }
         }
 

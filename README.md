@@ -2,7 +2,7 @@
 
 <img src="docs/01-main-menu.png" alt="PROMEDIA COPILOT" width="520"/>
 
-**PROMEDIA COPILOT** · Version 1.2.5
+**PROMEDIA COPILOT** · Version 1.5.0
 
 *An internal PowerShell-based tool that automates renaming, printing, filing and Excel generation for warehouse pick lists and delivery notes*
 
@@ -11,7 +11,7 @@
 ![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)
 ![Excel](https://img.shields.io/badge/Excel-COM%20interop-217346?logo=microsoftexcel&logoColor=white)
-![Version](https://img.shields.io/badge/version-1.2.5-blue)
+![Version](https://img.shields.io/badge/version-1.5.0-blue)
 
 </div>
 
@@ -30,7 +30,8 @@
   - [Annotate pick lists](#annotate-pick-lists)
   - [Print](#print)
   - [Move to folders](#move-to-folders)
-  - [Scanned documents (beta)](#scanned-documents-beta)
+  - [Scanned documents](#scanned-documents)
+  - [Certificate of Origin (beta)](#certificate-of-origin-beta)
   - [Settings](#settings)
 - [Tech stack](#tech-stack)
 - [Project structure](#project-structure)
@@ -102,6 +103,7 @@ The first start asks once for printer and folders. A white entry still needs a v
 | **'Noch zu drucken' folder** | Optional second target for pick lists to be printed again later |
 | **Pump control folder** | Where the pump scan control files go |
 | **Halle M scan folder** | Where the scans of signed delivery notes land |
+| **COO folder** | Optional: the certificate of origin folder with `COO calculation.xlsx`, `Coo IHK Formulare`, `Coo Italy` and the customer folders |
 | **Banner style** | A single plain line (default) or the large banner |
 
 The outbound folder is searched by country, customer and, if present, location and month. Countries may be named in German, English or as a code (`Deutschland`, `Germany`, `DE`), and month folders are recognized in many spellings (`Oktober 2026`, `Okt 26`, `2026-10`).
@@ -214,7 +216,7 @@ Plain year folders such as `2025` are treated as archive and never offered as a 
 
 <img src="docs/move-picks.webp" width="620"/>
 
-### Scanned documents (beta)
+### Scanned documents
 
 The warehouse scans every signed delivery note after pickup, and the scans land in the Halle M folder with names like `doc0001.pdf`. **FÜ scan** reads them with the OCR built into Windows, no internet and no extra software, and proposes a name: `FÜ_<customer>_<order number>_<scan date>.pdf`. Each one is confirmed with `y`.
 
@@ -224,6 +226,35 @@ The warehouse scans every signed delivery note after pickup, and the scans land 
 **Auto move FÜ documents** files the renamed scans into the same customer folders as the delivery documents, using the address and the date read from the scan. OCR on paper is never perfect, so every proposal is worth a quick look.
 
 <img src="docs/fu-move.webp" width="620"/>
+
+### Certificate of Origin (beta)
+
+For the German certificate of origin (IHK) Axium sends a draft e-mail with the Axium sales invoice and, for goods of Egyptian origin, the certificates of origin of the Italian chamber of commerce. Save the attachments with **Download all** as a ZIP into the Downloads folder, then choose **Certificate of Origin**. A short screen tells what is needed, `Enter` starts. If there is more than one thing to do, a list shows the draft ZIPs and the issued certificates in the Downloads folder.
+
+Every ZIP with PDFs counts, whatever the attachments are called: PROMEDIA COPILOT reads each PDF and recognizes the invoice and the Italian certificates by their content. The draft number (8 digits) comes from the ZIP name; dates such as `20261016` are not taken for it. If the name has no number, the number of an attached IHK draft is used, otherwise it is asked for. Update ZIPs of PROMEDIA COPILOT itself are left out. The invoice decides by its origin column:
+
+| Origin | What happens |
+| --- | --- |
+| **Egypt** | New Italian certificates go to the sheet `COO Italy`, one row per lot. The lots of the invoice go to `COO DE` under the draft number. `Formular IHK` is set to the draft number and saved as `COO <number>_IHK Formulare.pdf` in `Coo IHK Formulare`, ready for the IHK upload. New Italian certificates are filed in `Coo Italy` as `CO Italia_Lot <lots>_<number>.pdf`. |
+| **Italy** | Nothing is calculated. A summary of the invoice is shown to check the IHK draft. |
+
+How the numbers are worked out:
+
+- Pallets per lot by rule of three: EA of the lot / (EA of the invoice / packages of the invoice). For the Italian certificates the same with their quantities and pallets.
+- Net and gross weight are split by the EA share of each lot, so the rows always add up to the totals of the document.
+- The Italian chamber often swaps net and gross weight. The bigger value is always taken as gross weight.
+- For each lot the preview shows the covering Italian certificates and the gross weight still left on them. A lot without an Italian certificate or with too little weight left is shown in red.
+- If the invoice also has goods of other origin, its totals cannot be used: pallets, net and gross weight of the Egyptian goods are typed in from the IHK draft, with a suggestion from the Italian certificates.
+
+Before anything is written, everything is shown in a preview and confirmed with `y`. A draft number that is already in `COO DE` is not entered a second time; it is only compared with the invoice. Before each change a copy of `COO calculation.xlsx` goes to `_coo_backup` in the PROMEDIA COPILOT folder (the last 20 are kept). If the workbook is open, by you or a colleague, nothing is changed.
+
+**Issued certificates.** When the certificate comes back from the IHK, save it into the Downloads folder: the scan named `COO_<number>_<customer>.pdf` (older spellings such as `Coo 40068203 MPC UAE.pdf` work too) or the IHK downloads `..._digital_CoO.pdf` and `..._cert_doc.pdf`. **Certificate of Origin** lists them by number and moves them into the customer folder in the COO folder:
+
+- The customer folder is found by the file name (`Tamer` -> `Tamer Jeddah _SA`), otherwise by the consignee in the document (`TAMER ... JEDDAH ... SAUDI ARABIA`). If neither is clear, the folder is chosen from a list.
+- Files are named `COO_<number>_<customer>.pdf`, with the customer part taken from the newest certificate in that folder (`Tamer`, `MPC_UAE`, `Seeder_Qatar`). IHK downloads keep their name.
+- A file that is already in the customer folder (same content, any name) is only removed from the Downloads folder. A different file with the same name is never replaced; the new one gets ` (2)`.
+
+The COO folder is set under **Settings**. Writing takes about half a minute, because Excel recalculates the whole workbook once.
 
 ### Settings
 
@@ -239,7 +270,7 @@ Printer and folders can be changed at any time, in the same list as on first sta
 | --- | --- |
 | Runtime | PowerShell 5.1, Windows Console API |
 | Spreadsheets | Excel COM interop |
-| PDF parsing | Manual PDF stream inflate + text-token extraction, no external library |
+| PDF parsing | Manual PDF stream inflate + text-token extraction, no external library; a layout-aware reader (fonts, CMaps, object streams) for invoices and certificates of origin |
 | OCR | Windows.Media.Ocr, built into Windows |
 
 ---
@@ -261,12 +292,25 @@ PROMEDIA COPILOT/
 └── docs/                       screenshots used above
 ```
 
-`_promedia_copilot_settings.txt`, `_promedia_copilot_pairs.txt` and
-`_promedia_copilot_printed.txt` are created at runtime and never leave the machine.
+`_promedia_copilot_settings.txt`, `_promedia_copilot_pairs.txt`,
+`_promedia_copilot_printed.txt` and the `_coo_backup` folder are created at runtime and never leave the machine.
 
 ---
 
 ## Changelog
+
+### 1.5.0
+
+- New menu item **Certificate of Origin (beta)**: reads the ZIP of the Axium draft e-mail
+  (sales invoice and Italian certificates of origin, whatever the attachments are called),
+  fills `COO Italy` and `COO DE` in `COO calculation.xlsx`, saves the IHK form as PDF and
+  files new Italian certificates. Goods of Italian origin only get a summary to check the
+  IHK draft.
+- Issued certificates from the IHK in the Downloads folder are moved into the customer
+  folder and named `COO_<number>_<customer>.pdf`.
+- New setting **COO folder** for the certificate of origin folder.
+- New PDF text reader for documents that are not made by Business Central.
+- FÜ scan and Auto move FÜ documents are no longer beta.
 
 ### 1.2.5
 

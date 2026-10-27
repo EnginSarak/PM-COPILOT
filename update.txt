@@ -1,5 +1,5 @@
-VERSION=1.2.5
-NOTE=The plain banner is now the default
+VERSION=1.5.0
+NOTE=New menu item Certificate of Origin (beta): fills COO calculation.xlsx from the Axium draft e-mail ZIP, saves the IHK form and files issued certificates; FU scan is no longer beta
 FILE=_promedia_copilot.ps1
 FILE=PROMEDIA COPILOT.bat
 FILE=reset.bat
