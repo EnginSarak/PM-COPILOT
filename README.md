@@ -2,7 +2,7 @@
 
 <img src="docs/01-main-menu.png" alt="PROMEDIA COPILOT" width="520"/>
 
-**PROMEDIA COPILOT** · Version 1.5.0
+**PROMEDIA COPILOT** · Version 1.5.1
 
 *An internal PowerShell-based tool that automates renaming, printing, filing and Excel generation for warehouse pick lists and delivery notes*
 
@@ -11,7 +11,7 @@
 ![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)
 ![Excel](https://img.shields.io/badge/Excel-COM%20interop-217346?logo=microsoftexcel&logoColor=white)
-![Version](https://img.shields.io/badge/version-1.5.0-blue)
+![Version](https://img.shields.io/badge/version-1.5.1-blue)
 
 </div>
 
@@ -244,6 +244,12 @@ How the numbers are worked out:
 - Net and gross weight are split by the EA share of each lot, so the rows always add up to the totals of the document.
 - The Italian chamber often swaps net and gross weight. The bigger value is always taken as gross weight.
 - For each lot the preview shows the covering Italian certificates and the gross weight still left on them. A lot without an Italian certificate or with too little weight left is shown in red.
+- Each Italian certificate is checked before anything is written:
+  - **Pallets** for its EA by the EA per pallet of the article in the catalog. The article number comes from the invoice line of its lots. Without a catalog entry the usual EA per pallet of the earlier certificates of the article is used.
+  - **Net and gross weight per EA** by the earlier certificates of the same article in `Coo Italy` (net within 1 %, gross within 3 %).
+  - If it does not fit, for example 8 pallets where 8,400 EA make 7, the preview shows the expected values in red and the run stops; it only goes on if you confirm. Usually the Italian chamber has to cancel and reissue such a certificate. Articles with fewer than 3 earlier certificates get no weight check.
+  - The catalog comes from the catalog backup of PROMEDIA Control: put `Katalog_Backup_*.json` into the Downloads folder once (and again after catalog changes). The newest one is kept as `_coo_catalog.json` next to the script. The values of the earlier certificates are read once and kept in `_coo_history.txt`, after that only new files are read.
+- The pallets of the invoice are checked against the catalog too; a difference is shown in red.
 - If the invoice also has goods of other origin, its totals cannot be used: pallets, net and gross weight of the Egyptian goods are typed in from the IHK draft, with a suggestion from the Italian certificates.
 
 Before anything is written, everything is shown in a preview and confirmed with `y`. A draft number that is already in `COO DE` is not entered a second time; it is only compared with the invoice. Before each change a copy of `COO calculation.xlsx` goes to `_coo_backup` in the PROMEDIA COPILOT folder (the last 20 are kept). If the workbook is open, by you or a colleague, nothing is changed.
@@ -293,11 +299,19 @@ PROMEDIA COPILOT/
 ```
 
 `_promedia_copilot_settings.txt`, `_promedia_copilot_pairs.txt`,
-`_promedia_copilot_printed.txt` and the `_coo_backup` folder are created at runtime and never leave the machine.
+`_promedia_copilot_printed.txt`, `_coo_history.txt`, `_coo_catalog.json` and the `_coo_backup` folder are created at runtime and never leave the machine.
 
 ---
 
 ## Changelog
+
+### 1.5.1
+
+- Certificate of Origin: Italian certificates are checked before anything is written.
+  Pallets by the EA per pallet of the article in the catalog backup (`Katalog_Backup_*.json`),
+  net and gross weight per EA by the earlier certificates of the same article. A certificate
+  that does not fit stops the run with the expected values, instead of the fixed 1,200 EA
+  per pallet hint. The pallets of the invoice are checked against the catalog too.
 
 ### 1.5.0
 

@@ -938,7 +938,7 @@ function Stop-Spin($spin) {
     try { [Console]::Write("`r" + (' ' * 78) + "`r") } catch { }
 }
 
-$script:AppVersion = '1.5.0'
+$script:AppVersion = '1.5.1'
 
 function Compare-AppVersion([string]$a, [string]$b) {
     $pa = @($a -split '\.' | ForEach-Object { try { [int]$_ } catch { 0 } })
@@ -4207,6 +4207,8 @@ $CooWorkbookName = 'COO calculation.xlsx'
 $CooFormDirName = 'Coo IHK Formulare'
 $CooItalyDirName = 'Coo Italy'
 $CooCertRx = '\bC\d{2}[0-9A-Z]{2}\d{7}\b'
+$CooHistoryFile = '_coo_history.txt'
+$CooCatalogFile = '_coo_catalog.json'
 
 function ConvertFrom-CooNumber([string]$v) {
     # "1.688,40", "2170,80", "1608", "4888.00" -> double
@@ -4340,6 +4342,7 @@ function Get-CooItalianCert([string[]]$lines) {
     }
     $prm = [regex]::Match($text, '(?m)^\s*(F\d{5}-\d{2}\s+.+?)(?:\s{3,}|$)')
     if ($prm.Success) { $c.Product = $prm.Groups[1].Value.Trim() }
+    $c.Products = @([regex]::Matches($text, '\bF\d{5}-\d{2}\b') | ForEach-Object { $_.Value } | Select-Object -Unique)
     $im = [regex]::Match($text, '(?m)\b([A-Z][a-z]+),\s*(\d{2}/\d{2}/\d{4})')
     if ($im.Success) { $c.Issued = $im.Groups[2].Value }
 
@@ -4394,6 +4397,140 @@ function Get-CooItalyRows($cert) {
         $rows.Add(@{ Cert = $cert.Number; Doc = $cert.Doc; Lot = $lots[$i].Lot; Pal = $pal[$i]; Net = $net[$i]; Gross = $gross[$i] })
     }
     return ,$rows
+}
+
+function Get-CooCertQty($cert) {
+    # Total EA of a certificate, $null if a lot has no quantity
+    $q = 0.0
+    foreach ($l in $cert.Lots) { if (-not $l.Qty) { return $null }; $q += $l.Qty }
+    if ($q -le 0) { return $null }
+    return $q
+}
+
+function Get-CooHistory([string]$cooDir) {
+    # EA, pallets and weights of every Italian certificate in "Coo Italy", the reference for Test-CooCert.
+    # Reading all PDFs takes about a minute, so the values are kept in _coo_history.txt and only new files are read.
+    $path = Join-Path $AppDir $CooHistoryFile
+    $ci = [System.Globalization.CultureInfo]::InvariantCulture
+    $old = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
+    if (Test-Path -LiteralPath $path) {
+        try {
+            foreach ($ln in [System.IO.File]::ReadAllLines($path)) {
+                $i = $ln.IndexOf('|')
+                if ($i -gt 0) { $old[$ln.Substring(0, $i)] = $ln.Substring($i + 1) }
+            }
+        } catch { }
+    }
+    $files = @(Get-ChildItem -LiteralPath (Join-Path $cooDir $CooItalyDirName) -Filter '*.pdf' -ErrorAction SilentlyContinue)
+    $keyOf = { param($f) $f.Name + '*' + $f.Length + '*' + $f.LastWriteTimeUtc.Ticks }
+    $todo = @($files | Where-Object { -not $old.ContainsKey((& $keyOf $_)) }).Count
+    $lines = New-Object System.Collections.Generic.List[string]
+    $certs = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    $spin = $null
+    if ($todo -gt 0) { $spin = Start-Spin ("reading " + $todo + " Italian certificate(s) in '" + $CooItalyDirName + "' for the plausibility check...") }
+    try {
+        foreach ($f in $files) {
+            $key = & $keyOf $f
+            if ($old.ContainsKey($key)) { $val = $old[$key] }
+            else {
+                $val = ''
+                try {
+                    $c = Get-CooItalianCert (Get-PdfLines $f.FullName)
+                    $q = $null
+                    if ($c) { $q = Get-CooCertQty $c }
+                    if ($c -and $q -and $c.Pallets -and $c.Net -and $c.Gross) {
+                        $val = @($c.Number, ($c.Products -join ','), $q.ToString($ci), $c.Pallets.ToString($ci), $c.Net.ToString($ci), $c.Gross.ToString($ci)) -join '|'
+                    }
+                } catch { }
+            }
+            $lines.Add($key + '|' + $val)
+            $p = $val.Split('|')
+            if ($p.Count -lt 6 -or $seen.ContainsKey($p[0])) { continue }
+            $seen[$p[0]] = $true
+            $certs.Add(@{ Number = $p[0]; Products = @($p[1].Split(',') | Where-Object { $_ }); Qty = [double]::Parse($p[2], $ci); Pallets = [double]::Parse($p[3], $ci); Net = [double]::Parse($p[4], $ci); Gross = [double]::Parse($p[5], $ci) })
+        }
+    } finally { Stop-Spin $spin }
+    if ($todo -gt 0 -or $lines.Count -ne $old.Count) {
+        try { [System.IO.File]::WriteAllLines($path, $lines.ToArray()) } catch { }
+    }
+    return ,$certs
+}
+
+function Get-CooMedian([double[]]$v) {
+    [Array]::Sort($v)
+    $n = $v.Count
+    if ($n % 2 -eq 1) { return $v[($n - 1) / 2] }
+    return ($v[$n / 2 - 1] + $v[$n / 2]) / 2
+}
+
+function Get-CooCatalog {
+    # EA per pallet by article number, from the catalog backup of PROMEDIA Control (Katalog_Backup_*.json).
+    # The newest backup in the Downloads or program folder is kept as _coo_catalog.json, so it may be deleted there.
+    $keep = Join-Path $AppDir $CooCatalogFile
+    $new = @(Get-ChildItem -LiteralPath @($WorkDir, $AppDir) -Filter 'Katalog_Backup_*.json' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+    if ($new.Count -gt 0 -and (-not (Test-Path -LiteralPath $keep) -or $new[0].LastWriteTime -gt (Get-Item -LiteralPath $keep).LastWriteTime)) {
+        try { Copy-Item -LiteralPath $new[0].FullName -Destination $keep -Force -ErrorAction Stop } catch { }
+    }
+    $cat = @{}
+    if (-not (Test-Path -LiteralPath $keep)) { return $cat }
+    try {
+        $j = [System.IO.File]::ReadAllText($keep, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+        foreach ($e in @($j.catalog)) {
+            if ($e.crossRef -and $e.pallet -gt 0) { $cat[([string]$e.crossRef).Trim()] = [double]$e.pallet }
+        }
+    } catch { }
+    return $cat
+}
+
+function Get-CooPalletsByLot($inv, $catalog) {
+    # EA per pallet of every invoice lot, through its article number in the catalog
+    $res = @{}
+    foreach ($it in $inv.Items) {
+        $p = $catalog[[string]$it.Item]
+        if (-not $p) { continue }
+        foreach ($l in $it.Lots) { $res[[string]$l.Lot] = $p }
+    }
+    return $res
+}
+
+function Test-CooCert($cert, $history, $palByLot) {
+    # Checks an Italian certificate: pallets for its EA by the catalog (else by the earlier certificates of the article),
+    # net and gross weight per EA by the earlier certificates. The Italian chamber sometimes issues wrong pallet counts
+    # or weights, they must not reach the IHK form.
+    $res = @{ Ref = 0; Product = ''; PalBy = ''; Problems = (New-Object System.Collections.Generic.List[string]) }
+    $q = Get-CooCertQty $cert
+    if (@($cert.Products).Count -ne 1 -or -not $q -or -not $cert.Pallets -or -not $cert.Net -or -not $cert.Gross) { return $res }
+    $res.Product = $cert.Products[0]
+    $same = @($history | Where-Object { $_.Number -ne $cert.Number -and $_.Products.Count -eq 1 -and $_.Products[0] -eq $res.Product })
+    $res.Ref = $same.Count
+    $ea = $q.ToString('#,##0', $UnitsDe) + " EA"
+
+    # one article per certificate: a lot of it on the invoice gives the pallet size for all its lots
+    $catPal = $null
+    foreach ($l in $cert.Lots) { if ($palByLot -and $palByLot[[string]$l.Lot]) { $catPal = $palByLot[[string]$l.Lot]; break } }
+    $eaPal = $null
+    if ($catPal) { $eaPal = $catPal; $res.PalBy = 'catalog' }
+    elseif ($same.Count -ge 3) { $eaPal = Get-CooMedian ([double[]]@($same | ForEach-Object { $_.Qty / $_.Pallets })); $res.PalBy = 'earlier certificates' }
+    if ($eaPal) {
+        $expPal = [math]::Ceiling($q / $eaPal - 0.01)
+        if ($cert.Pallets -ne $expPal) {
+            $res.Problems.Add("pallets " + (Format-CooPal $cert.Pallets) + ", expected " + $expPal + "  (" + $ea + ", " + $eaPal.ToString('#,##0', $UnitsDe) + " EA per pallet by the " + $res.PalBy + ")")
+        }
+    }
+
+    if ($same.Count -lt 3) { return $res }
+    $netEa = Get-CooMedian ([double[]]@($same | ForEach-Object { $_.Net / $_.Qty }))
+    $grossEa = Get-CooMedian ([double[]]@($same | ForEach-Object { $_.Gross / $_.Qty }))
+    $expNet = [math]::Round($q * $netEa, 2)
+    $expGross = [math]::Round($q * $grossEa, 2)
+    if ([math]::Abs($cert.Net / $expNet - 1) -gt 0.01) {
+        $res.Problems.Add("net " + (Format-CooKg $cert.Net) + " kg, expected " + (Format-CooKg $expNet) + " kg  (" + $ea + " x " + $netEa.ToString('0.0000', $UnitsDe) + " kg)")
+    }
+    if ([math]::Abs($cert.Gross / $expGross - 1) -gt 0.03) {
+        $res.Problems.Add("gross " + (Format-CooKg $cert.Gross) + " kg, expected " + (Format-CooKg $expGross) + " kg  (" + $ea + " x " + $grossEa.ToString('0.0000', $UnitsDe) + " kg)")
+    }
+    return $res
 }
 
 function Get-CooEgyptLots($inv) {
@@ -4823,11 +4960,15 @@ function Show-CooIntro {
     Write-Host "       origin, the Italian certificates. The draft number comes from the ZIP name." -ForegroundColor Gray
     Write-Host "     - and/or the issued certificate from the IHK: COO_<number>_<customer>.pdf," -ForegroundColor Gray
     Write-Host "       ..._digital_CoO.pdf or ..._cert_doc.pdf" -ForegroundColor Gray
+    Write-Host "     - once, and again after catalog changes: the catalog backup Katalog_Backup_*.json" -ForegroundColor Gray
+    Write-Host "       for the EA per pallet of each article (it is kept, you may delete it afterwards)" -ForegroundColor Gray
     Write-Host ""
     Write-Host "   What happens:" -ForegroundColor Yellow
     Write-Host "     Draft, Egypt : new Italian certificates go to 'COO Italy', the invoice lots to 'COO DE'," -ForegroundColor Gray
     Write-Host "                    the IHK form is saved as PDF in 'Coo IHK Formulare' and new Italian" -ForegroundColor Gray
-    Write-Host "                    certificates are filed in 'Coo Italy'." -ForegroundColor Gray
+    Write-Host "                    certificates are filed in 'Coo Italy'. Italian certificates whose pallets do" -ForegroundColor Gray
+    Write-Host "                    not fit the catalog (Katalog_Backup_*.json) or whose weights do not fit" -ForegroundColor Gray
+    Write-Host "                    the earlier certificates of the article stop the run." -ForegroundColor Gray
     Write-Host "     Draft, Italy : nothing to calculate, a summary to check the IHK draft is shown." -ForegroundColor Gray
     Write-Host "     Certificate  : moved to the customer folder as COO_<number>_<customer>.pdf." -ForegroundColor Gray
     Write-Host ""
@@ -4872,9 +5013,20 @@ function Show-CooPlan($plan, [string]$pdfPath, $fileCerts) {
         $line = "     " + $c.Number + "  " + $c.Doc + "  " + (Format-CooPal ([double]$c.Pallets)) + " pallets   net " + (Format-CooKg ([double]$c.Net)) + "   gross " + (Format-CooKg ([double]$c.Gross))
         Write-Host $line -ForegroundColor Gray
         if ($c.Swapped) { Write-Host "       net and gross were swapped on the certificate, corrected" -ForegroundColor DarkYellow }
-        $tq = 0.0; foreach ($l in $c.Lots) { if ($l.Qty) { $tq += $l.Qty } }
-        if ($tq -gt 0 -and $c.Pallets -and [math]::Abs($tq / $c.Pallets - 1200) -gt 60) {
-            Write-Host ("       " + $tq.ToString('#,##0', $UnitsDe) + " EA on " + $c.Pallets + " pallets (" + ($tq / $c.Pallets).ToString('#,##0', $UnitsDe) + " EA per pallet) - check the pallet count") -ForegroundColor DarkYellow
+        $chk = $ci.Check
+        if ($chk -and $chk.Problems.Count -gt 0) {
+            $pc = if ($ci.Status -match '^already') { 'Yellow' } else { 'Red' }
+            Write-Host ("       does not fit " + $chk.Product + ":") -ForegroundColor $pc
+            foreach ($p in $chk.Problems) { Write-Host ("         " + $p) -ForegroundColor $pc }
+            if ($chk.Ref -lt 3) { Write-Host ("         weights not checked: fewer than 3 earlier certificates of " + $chk.Product) -ForegroundColor DarkGray }
+        } elseif ($chk -and $chk.Product -and -not $chk.PalBy) {
+            Write-Host ("       not checked: " + $chk.Product + " is not in the catalog and has fewer than 3 earlier certificates in '" + $CooItalyDirName + "'") -ForegroundColor DarkGray
+        } elseif ($chk -and $chk.Product -and $chk.Ref -lt 3) {
+            Write-Host ("       pallets fit the catalog, weights not checked: fewer than 3 earlier certificates of " + $chk.Product) -ForegroundColor DarkGreen
+        } elseif ($chk -and $chk.Product) {
+            Write-Host ("       pallets fit the " + $chk.PalBy + ", weights fit the " + $chk.Ref + " earlier certificates of " + $chk.Product) -ForegroundColor DarkGreen
+        } elseif ($chk -and $ci.Status -notmatch '^could not') {
+            Write-Host "       not checked: several articles or quantities missing" -ForegroundColor DarkGray
         }
         $color = if ($ci.Status -eq 'new') { 'Green' } elseif ($ci.Status -match '^already') { 'DarkGray' } else { 'Yellow' }
         Write-Host ("       " + $ci.Status) -ForegroundColor $color
@@ -5030,6 +5182,9 @@ function Invoke-CooZip($sel, [string]$cooDir, [string]$wbPath) {
             $totals = $t
         }
 
+        $history = @()
+        if ($case.Certs.Count -gt 0) { $history = Get-CooHistory $cooDir }
+
         $lock = Join-Path $cooDir ('~$' + $CooWorkbookName)
         if (Test-Path -LiteralPath $lock) {
             Write-Host ""
@@ -5051,7 +5206,35 @@ function Invoke-CooZip($sel, [string]$cooDir, [string]$wbPath) {
         try { $plan = Get-CooPlan $case $nr $h.Wb $totals } finally { Stop-Spin $spin }
         $pdfPath = Get-CooFormPath $cooDir $nr
         $fileCerts = Get-CooCertsToFile $case $cooDir
+        $catalog = Get-CooCatalog
+        $palByLot = Get-CooPalletsByLot $inv $catalog
+        $need = 0.0
+        foreach ($it in $inv.Items) {
+            if (-not $catalog[[string]$it.Item]) { $need = $null; break }
+            $need += $it.Qty / $catalog[[string]$it.Item]
+        }
+        if ($null -ne $need -and $inv.Packages -and $inv.Packages -ne [math]::Ceiling($need - 0.01)) {
+            $plan.Warnings.Add("Invoice: " + $inv.Packages + " packages, by the catalog " + [math]::Ceiling($need - 0.01) + " pallets - check the pallet count of the invoice")
+        }
+        $bad = New-Object System.Collections.Generic.List[string]
+        foreach ($ci in $plan.CertInfo) {
+            if ($ci.Status -match '^origin') { continue }
+            $ci.Check = Test-CooCert $ci.Cert $history $palByLot
+            if ($ci.Check.Problems.Count -gt 0 -and $ci.Status -notmatch '^already') { $bad.Add($ci.Cert.Number) }
+        }
         Show-CooPlan $plan $pdfPath $fileCerts
+
+        if ($bad.Count -gt 0) {
+            Write-Host ""
+            Write-Host $light -ForegroundColor DarkCyan
+            Write-Host ("   STOP: " + ($bad -join ', ') + " does not fit the catalog or the earlier certificates (see above).") -ForegroundColor Red
+            Write-Host "   Usually the Italian chamber has to cancel and reissue it: ask Axium for a corrected certificate." -ForegroundColor Gray
+            $ans = Read-Host "   Continue anyway with the values on the certificate? (Y/N)"
+            if (-not ($ans -match '^\s*[yj]')) {
+                Write-Host "   Cancelled, nothing was changed." -ForegroundColor DarkGray
+                return
+            }
+        }
 
         $rows = $plan.ItNew.Count + $plan.DeNew.Count
         if ($plan.DeNew.Count -eq 0 -and $plan.DeExisting.Count -eq 0) {
