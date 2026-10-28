@@ -58,8 +58,8 @@ A normal day:
 | --- | --- | --- |
 | **PWS** | Delivery note | `PWS004410_SORD26-00412.pdf` |
 | **PAC** | Packing list | `PAC004410_SORD26-00412.pdf` |
-| **WP** | Warehouse pick list | `WP004521_NESTLE_DE_SORD26-00412.pdf` |
-| **FÜ** | Signed delivery note, scanned after pickup | `FÜ_Nestle_DE_SORD26-00398_260930.pdf` |
+| **WP** | Warehouse pick list | `WP004521_CUSTOMER_DE_SORD26-00412.pdf` |
+| **FÜ** | Signed delivery note, scanned after pickup | `FÜ_Customer_DE_SORD26-00398_260930.pdf` |
 
 A delivery note and a packing list with the same number form a pair.
 
@@ -111,16 +111,16 @@ The outbound folder is searched by country, customer and, if present, location a
 ```
 O:\Outbound
 ├── Deutschland
-│   └── Nestle DE
+│   └── Customer DE
 │       ├── 2025                    year folder, archive only
 │       └── September 2026
 ├── Frankreich
-│   └── Hemodia
+│   └── Customer FR
 │       └── Oktober 2026
 └── Saudi Arabien
-    └── Tamer
-        ├── Jeddah
-        └── Riyadh
+    └── Customer SA
+        ├── City A
+        └── City B
 ```
 
 ---
@@ -229,7 +229,7 @@ The warehouse scans every signed delivery note after pickup, and the scans land 
 
 ### Certificate of Origin (beta)
 
-For the German certificate of origin (IHK) Axium sends a draft e-mail with the Axium sales invoice and, for goods of Egyptian origin, the certificates of origin of the Italian chamber of commerce. Save the attachments with **Download all** as a ZIP into the Downloads folder, then choose **Certificate of Origin**. A short screen tells what is needed, `Enter` starts. If there is more than one thing to do, a list shows the draft ZIPs and the issued certificates in the Downloads folder.
+For the German certificate of origin (IHK) the supplier sends a draft e-mail with its sales invoice and, for goods of Egyptian origin, the certificates of origin of the Italian chamber of commerce. Save the attachments with **Download all** as a ZIP into the Downloads folder, then choose **Certificate of Origin**. A short screen tells what is needed, `Enter` starts. If there is more than one thing to do, a list shows the draft ZIPs and the issued certificates in the Downloads folder.
 
 Every ZIP with PDFs counts, whatever the attachments are called: PROMEDIA COPILOT reads each PDF and recognizes the invoice and the Italian certificates by their content. The draft number (8 digits) comes from the ZIP name; dates such as `20261016` are not taken for it. If the name has no number, the number of an attached IHK draft is used, otherwise it is asked for. Update ZIPs of PROMEDIA COPILOT itself are left out. The invoice decides by its origin column:
 
@@ -254,10 +254,10 @@ How the numbers are worked out:
 
 Before anything is written, everything is shown in a preview and confirmed with `y`. A draft number that is already in `COO DE` is not entered a second time; it is only compared with the invoice. Before each change a copy of `COO calculation.xlsx` goes to `_coo_backup` in the PROMEDIA COPILOT folder (the last 20 are kept). If the workbook is open, by you or a colleague, nothing is changed.
 
-**Issued certificates.** When the certificate comes back from the IHK, save it into the Downloads folder: the scan named `COO_<number>_<customer>.pdf` (older spellings such as `Coo 40068203 MPC UAE.pdf` work too) or the IHK downloads `..._digital_CoO.pdf` and `..._cert_doc.pdf`. **Certificate of Origin** lists them by number and moves them into the customer folder in the COO folder:
+**Issued certificates.** When the certificate comes back from the IHK, save it into the Downloads folder: the scan named `COO_<number>_<customer>.pdf` (older spellings such as `Coo 40068203 Customer.pdf` work too) or the IHK downloads `..._digital_CoO.pdf` and `..._cert_doc.pdf`. **Certificate of Origin** lists them by number and moves them into the customer folder in the COO folder:
 
-- The customer folder is found by the file name (`Tamer` -> `Tamer Jeddah _SA`), otherwise by the consignee in the document (`TAMER ... JEDDAH ... SAUDI ARABIA`). If neither is clear, the folder is chosen from a list.
-- Files are named `COO_<number>_<customer>.pdf`, with the customer part taken from the newest certificate in that folder (`Tamer`, `MPC_UAE`, `Seeder_Qatar`). IHK downloads keep their name.
+- The customer folder is found by the file name (`Customer` -> `Customer City _CC`), otherwise by the consignee in the document (`CUSTOMER ... CITY ... COUNTRY`). If neither is clear, the folder is chosen from a list.
+- Files are named `COO_<number>_<customer>.pdf`, with the customer part taken from the newest certificate in that folder (for example `Customer` or `Customer_CC`). IHK downloads keep their name.
 - A file that is already in the customer folder (same content, any name) is only removed from the Downloads folder. A different file with the same name is never replaced; the new one gets ` (2)`.
 
 The COO folder is set under **Settings**. Writing takes about half a minute, because Excel recalculates the whole workbook once.
@@ -315,7 +315,7 @@ PROMEDIA COPILOT/
 
 ### 1.5.0
 
-- New menu item **Certificate of Origin (beta)**: reads the ZIP of the Axium draft e-mail
+- New menu item **Certificate of Origin (beta)**: reads the ZIP of the supplier's draft e-mail
   (sales invoice and Italian certificates of origin, whatever the attachments are called),
   fills `COO Italy` and `COO DE` in `COO calculation.xlsx`, saves the IHK form as PDF and
   files new Italian certificates. Goods of Italian origin only get a summary to check the
@@ -338,9 +338,10 @@ PROMEDIA COPILOT/
   used RE (Reunion) instead of IT (Italy). Two-letter codes in brackets are now
   ignored for both country and location, and the country is determined before
   a trailing country line is removed from the address.
-- The customer name FAROUK MAAMOUN is written as Tamer whenever it appears in a
-  file name (renamed documents, pick lists, pump lists and pump control files).
-  The documents themselves are not changed.
+- A customer whose documents carry the name of a contact person instead of the
+  company name gets the company name in every file name (renamed documents, pick
+  lists, pump lists and pump control files). The documents themselves are not
+  changed.
 
 ### 1.2.2
 
