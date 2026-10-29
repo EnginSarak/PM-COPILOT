@@ -2109,6 +2109,7 @@ function Invoke-FuScan {
             $skipped++
             continue
         }
+        if ($info.Kunde -match '^(?i)PR[O0]MED[I1l]A') { continue }
 
         $datum = $f.LastWriteTime.ToString('yyMMdd')
         $baseName = $FuPrefix + "_" + $info.Kunde + "_" + $info.Order + "_" + $datum + ".pdf"
