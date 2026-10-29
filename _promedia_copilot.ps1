@@ -4497,9 +4497,9 @@ function Get-CooPalletsByLot($inv, $catalog) {
 
 function Test-CooCert($cert, $history, $palByLot) {
     # Checks an Italian certificate: pallets for its EA by the catalog (else by the earlier certificates of the article),
-    # net and gross weight per EA by the earlier certificates. The Italian chamber sometimes issues wrong pallet counts
-    # or weights, they must not reach the IHK form.
-    $res = @{ Ref = 0; Product = ''; PalBy = ''; Problems = (New-Object System.Collections.Generic.List[string]) }
+    # net and gross weight per EA by the earlier certificates. Wrong pallet counts must not reach the IHK form,
+    # weights are taken as on the certificate and a difference is only shown.
+    $res = @{ Ref = 0; Product = ''; PalBy = ''; Problems = (New-Object System.Collections.Generic.List[string]); Notes = (New-Object System.Collections.Generic.List[string]) }
     $q = Get-CooCertQty $cert
     if (@($cert.Products).Count -ne 1 -or -not $q -or -not $cert.Pallets -or -not $cert.Net -or -not $cert.Gross) { return $res }
     $res.Product = $cert.Products[0]
@@ -4526,10 +4526,10 @@ function Test-CooCert($cert, $history, $palByLot) {
     $expNet = [math]::Round($q * $netEa, 2)
     $expGross = [math]::Round($q * $grossEa, 2)
     if ([math]::Abs($cert.Net / $expNet - 1) -gt 0.01) {
-        $res.Problems.Add("net " + (Format-CooKg $cert.Net) + " kg, expected " + (Format-CooKg $expNet) + " kg  (" + $ea + " x " + $netEa.ToString('0.0000', $UnitsDe) + " kg)")
+        $res.Notes.Add("net " + (Format-CooKg $cert.Net) + " kg, expected " + (Format-CooKg $expNet) + " kg  (" + $ea + " x " + $netEa.ToString('0.0000', $UnitsDe) + " kg)")
     }
     if ([math]::Abs($cert.Gross / $expGross - 1) -gt 0.03) {
-        $res.Problems.Add("gross " + (Format-CooKg $cert.Gross) + " kg, expected " + (Format-CooKg $expGross) + " kg  (" + $ea + " x " + $grossEa.ToString('0.0000', $UnitsDe) + " kg)")
+        $res.Notes.Add("gross " + (Format-CooKg $cert.Gross) + " kg, expected " + (Format-CooKg $expGross) + " kg  (" + $ea + " x " + $grossEa.ToString('0.0000', $UnitsDe) + " kg)")
     }
     return $res
 }
@@ -4968,8 +4968,8 @@ function Show-CooIntro {
     Write-Host "     Draft, Egypt : new Italian certificates go to 'COO Italy', the invoice lots to 'COO DE'," -ForegroundColor Gray
     Write-Host "                    the IHK form is saved as PDF in 'Coo IHK Formulare' and new Italian" -ForegroundColor Gray
     Write-Host "                    certificates are filed in 'Coo Italy'. Italian certificates whose pallets do" -ForegroundColor Gray
-    Write-Host "                    not fit the catalog (Katalog_Backup_*.json) or whose weights do not fit" -ForegroundColor Gray
-    Write-Host "                    the earlier certificates of the article stop the run." -ForegroundColor Gray
+    Write-Host "                    not fit the catalog (Katalog_Backup_*.json) stop the run. Weights are taken" -ForegroundColor Gray
+    Write-Host "                    as on the certificate, a difference to earlier certificates is only shown." -ForegroundColor Gray
     Write-Host "     Draft, Italy : nothing to calculate, a summary to check the IHK draft is shown." -ForegroundColor Gray
     Write-Host "     Certificate  : moved to the customer folder as COO_<number>_<customer>.pdf." -ForegroundColor Gray
     Write-Host ""
@@ -5024,10 +5024,16 @@ function Show-CooPlan($plan, [string]$pdfPath, $fileCerts) {
             Write-Host ("       not checked: " + $chk.Product + " is not in the catalog and has fewer than 3 earlier certificates in '" + $CooItalyDirName + "'") -ForegroundColor DarkGray
         } elseif ($chk -and $chk.Product -and $chk.Ref -lt 3) {
             Write-Host ("       pallets fit the catalog, weights not checked: fewer than 3 earlier certificates of " + $chk.Product) -ForegroundColor DarkGreen
+        } elseif ($chk -and $chk.Product -and $chk.Notes.Count -gt 0) {
+            Write-Host ("       pallets fit the " + $chk.PalBy) -ForegroundColor DarkGreen
         } elseif ($chk -and $chk.Product) {
             Write-Host ("       pallets fit the " + $chk.PalBy + ", weights fit the " + $chk.Ref + " earlier certificates of " + $chk.Product) -ForegroundColor DarkGreen
         } elseif ($chk -and $ci.Status -notmatch '^could not') {
             Write-Host "       not checked: several articles or quantities missing" -ForegroundColor DarkGray
+        }
+        if ($chk -and $chk.Notes.Count -gt 0) {
+            Write-Host ("       weights differ from the " + $chk.Ref + " earlier certificates of " + $chk.Product + ", taken as on the certificate:") -ForegroundColor DarkYellow
+            foreach ($n in $chk.Notes) { Write-Host ("         " + $n) -ForegroundColor DarkYellow }
         }
         $color = if ($ci.Status -eq 'new') { 'Green' } elseif ($ci.Status -match '^already') { 'DarkGray' } else { 'Yellow' }
         Write-Host ("       " + $ci.Status) -ForegroundColor $color
@@ -5228,7 +5234,7 @@ function Invoke-CooZip($sel, [string]$cooDir, [string]$wbPath) {
         if ($bad.Count -gt 0) {
             Write-Host ""
             Write-Host $light -ForegroundColor DarkCyan
-            Write-Host ("   STOP: " + ($bad -join ', ') + " does not fit the catalog or the earlier certificates (see above).") -ForegroundColor Red
+            Write-Host ("   STOP: " + ($bad -join ', ') + " has a pallet count that does not fit (see above).") -ForegroundColor Red
             Write-Host "   Usually the Italian chamber has to cancel and reissue it: ask Axium for a corrected certificate." -ForegroundColor Gray
             $ans = Read-Host "   Continue anyway with the values on the certificate? (Y/N)"
             if (-not ($ans -match '^\s*[yj]')) {
